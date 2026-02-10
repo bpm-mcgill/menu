@@ -9,6 +9,7 @@
 #include "stb_image.h"
 
 /* ---------- HELPERS ---------- */
+
 void premult_alpha(Texture* tex, unsigned char* data) {
     if (tex->channels == 4) {
         for (int i = 0; i < tex->width * tex->height; i++) {
@@ -20,6 +21,28 @@ void premult_alpha(Texture* tex, unsigned char* data) {
         }
     }
 }
+
+uint32_t round_to_pow2(uint32_t v) {
+    if (v == 0) return 1;
+    v--;
+    v |= v >> 1;
+    v |= v >> 2;
+    v |= v >> 4;
+    v |= v >> 8;
+    v |= v >> 16;
+    v++;
+    return v;
+}
+
+uint32_t hash_string(const char* str) {
+    uint32_t hash = 2166136261u;
+    while (*str) {
+        hash ^= (uint8_t)*str++;
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
 
 /* ---------- TEXTURE ---------- */
 
@@ -137,15 +160,6 @@ void texture_free(Texture* texture) {
 
 /* ---------- TEXTURE ATLAS ---------- */
 
-uint32_t hash_string(const char* str) {
-    uint32_t hash = 2166136261u;
-    while (*str) {
-        hash ^= (uint8_t)*str++;
-        hash *= 16777619u;
-    }
-    return hash;
-}
-
 TextureAtlas* atlas_create(Texture* texture, uint32_t initial_capacity) {
     TextureAtlas* atlas = malloc(sizeof(TextureAtlas));
     atlas->parent_texture = texture;
@@ -153,9 +167,10 @@ TextureAtlas* atlas_create(Texture* texture, uint32_t initial_capacity) {
     atlas->height = texture->height;
     atlas->count = 0;
     
-    // Multiply by 2 to reduce load factor, which will minimize hash collisions
-    atlas->capacity = initial_capacity * 2;
-    if (atlas->capacity < 16) atlas->capacity = 16; // Minimum capacity
+    // Double the requested size to reduce load factor to 50%
+    uint32_t target = initial_capacity * 2;
+    if (target < 16) target = 16; // Minimum capacity
+    atlas->capacity = round_to_pow2(target); // Keep capacity a power of 2
     atlas->slots = calloc(atlas->capacity, sizeof(AtlasSlot));
     
     return atlas;
@@ -164,18 +179,24 @@ TextureAtlas* atlas_create(Texture* texture, uint32_t initial_capacity) {
 void atlas_resize(TextureAtlas* atlas, uint32_t new_capacity) {
     uint32_t old_capacity = atlas->capacity;
     AtlasSlot* old_slots = atlas->slots;
+
+    // Ensure the new capacity is a power of 2
+    atlas->capacity = round_to_pow2(new_capacity);
     
-    atlas->capacity = new_capacity;
+    // Create the bitmask (Capacity - 1)
+    // If capacity is 16 (10000), mask is 15 (01111)
+    uint32_t mask = atlas->capacity - 1;
+
     atlas->slots = calloc(atlas->capacity, sizeof(AtlasSlot));
 
     for (uint32_t i = 0; i < old_capacity; i++) {
         if(!old_slots[i].occupied) continue; // Slot is empty
         
-        uint32_t new_index = old_slots[i].key_hash % atlas->capacity;
+        uint32_t new_index = old_slots[i].key_hash & mask;
 
         // Linear probe for free slot on hash collision
         while (atlas->slots[new_index].occupied) {
-            new_index = (new_index + 1) % atlas->capacity;
+            new_index = (new_index + 1) & mask;
         }
 
         atlas->slots[new_index] = old_slots[i];
@@ -192,12 +213,15 @@ void atlas_define_region(TextureAtlas* atlas, int x, int y, int w, int h, const 
     if (atlas->count >= (atlas->capacity - (atlas->capacity >> 2))) {
         atlas_resize(atlas, atlas->capacity * 2);
     }
+    
+    // Bitmask (capacity enforced power of 2)
+    uint32_t mask = atlas->capacity - 1;
 
     uint32_t hash = hash_string(name);
-    uint32_t index = hash % atlas->capacity;
+    uint32_t index = hash & mask;
 
     while (atlas->slots[index].occupied) {
-        index = (index + 1) % atlas->capacity;
+        index = (index + 1) & mask;
     }
 
     AtlasSlot* slot = &atlas->slots[index];
@@ -224,14 +248,17 @@ void atlas_define_region(TextureAtlas* atlas, int x, int y, int w, int h, const 
 
 TextureRegion* atlas_get_region(TextureAtlas* atlas, const char* name) {
     uint32_t hash = hash_string(name);
-    uint32_t index = hash % atlas->capacity;
+
+    uint32_t mask = atlas->capacity - 1;
+    
+    uint32_t index = hash & mask;
     uint32_t start_index = index;
 
     while (atlas->slots[index].occupied) {
         if (atlas->slots[index].key_hash == hash) {
             return &atlas->slots[index].region;
         }
-        index = (index + 1) % atlas->capacity;
+        index = (index + 1) & mask;
         if (index == start_index) break; // Traversed whole table
     }
     return NULL;
