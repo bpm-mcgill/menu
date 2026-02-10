@@ -8,6 +8,19 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
+/* ---------- HELPERS ---------- */
+void premult_alpha(Texture* tex, unsigned char* data) {
+    if (tex->channels == 4) {
+        for (int i = 0; i < tex->width * tex->height; i++) {
+            unsigned char* p = data + (i * 4);
+            float alpha = p[3] / 255.0f;
+            p[0] = (unsigned char)(p[0] * alpha);
+            p[1] = (unsigned char)(p[1] * alpha);
+            p[2] = (unsigned char)(p[2] * alpha);
+        }
+    }
+}
+
 /* ---------- TEXTURE ---------- */
 
 Texture* texture_load(const char* filepath, bool premultiply_alpha) {
@@ -22,15 +35,9 @@ Texture* texture_load(const char* filepath, bool premultiply_alpha) {
         free(tex);
         return NULL;
     }
-
-    if (premultiply_alpha && tex->channels == 4) {
-        for (int i = 0; i < tex->width * tex->height; i++) {
-            unsigned char* p = data + (i * 4);
-            float alpha = p[3] / 255.0f;
-            p[0] = (unsigned char)(p[0] * alpha);
-            p[1] = (unsigned char)(p[1] * alpha);
-            p[2] = (unsigned char)(p[2] * alpha);
-        }
+    
+    if (premultiply_alpha) {
+        premult_alpha(tex, data);
     }
 
     glGenTextures(1, &tex->id);
@@ -39,7 +46,7 @@ Texture* texture_load(const char* filepath, bool premultiply_alpha) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); 
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR); // Use GL_NEAREST for Pixel Art
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR); // GL_NEAREST for Pixel Art
 
     GLenum format = (tex->channels == 4) ? GL_RGBA : GL_RGB;
     glTexImage2D(GL_TEXTURE_2D, 0, format, tex->width, tex->height, 0, format, GL_UNSIGNED_BYTE, data);
@@ -50,6 +57,71 @@ Texture* texture_load(const char* filepath, bool premultiply_alpha) {
     tex->layer_count = 1;
     snprintf(tex->path, 256, "%s", filepath);
 
+    return tex;
+}
+
+Texture* texture_load_etc2_bin(const char* filepath) {
+    Texture* tex = malloc(sizeof(Texture));
+    if (!tex) return NULL;
+    
+    FILE* f = fopen(filepath, "rb");
+    if(!f) {
+        printf("Error: COUld not open file %s\n", filepath);
+        return NULL;
+    }
+    
+    // Read the header
+    BakedHeader header;
+    if (fread(&header, sizeof(BakedHeader), 1, f) != 1) {
+        fclose(f);
+        return NULL;
+    }
+    
+    // Validate the magic number in header
+    if (header.magic != 0x58455442) {
+        printf("Error: Invalid file format\n");
+        fclose(f);
+        return NULL;
+    }
+
+    // Read the compressed data
+    void* compressed_data = malloc(header.data_size);
+    if (fread(compressed_data, 1, header.data_size, f) != header.data_size) {
+        printf("Error: Could not read full texture data\n");
+        free(compressed_data);
+        fclose(f);
+        return NULL;
+    }
+    fclose(f);
+    
+    glGenTextures(1, &tex->id);
+    glBindTexture(GL_TEXTURE_2D, tex->id);
+
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); 
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR); // GL_NEAREST for Pixel Art
+
+    glCompressedTexImage2D(
+        GL_TEXTURE_2D,
+        0,
+        header.internal_format, // From header. Likely stores GL_COMPRESSED_RGBA8_ETC2_EAC
+        header.width,
+        header.height,
+        0,
+        (GLsizei)header.data_size,
+        compressed_data
+    );
+
+    free(compressed_data);
+
+    tex->width = header.width;
+    tex->height = header.height;
+    tex->channels = 4; // The compressed format only uses RGBA8
+
+    tex->layer_count = 1;
+    snprintf(tex->path, 256, "%s", filepath);
+    
     return tex;
 }
 
@@ -74,24 +146,51 @@ uint32_t hash_string(const char* str) {
     return hash;
 }
 
-TextureAtlas* atlas_create(Texture* texture) {
+TextureAtlas* atlas_create(Texture* texture, uint32_t initial_capacity) {
     TextureAtlas* atlas = malloc(sizeof(TextureAtlas));
     atlas->parent_texture = texture;
     atlas->width = texture->width;
     atlas->height = texture->height;
     atlas->count = 0;
     
-    atlas->capacity = 16;
+    // Multiply by 2 to reduce load factor, which will minimize hash collisions
+    atlas->capacity = initial_capacity * 2;
+    if (atlas->capacity < 16) atlas->capacity = 16; // Minimum capacity
     atlas->slots = calloc(atlas->capacity, sizeof(AtlasSlot));
     
     return atlas;
 }
 
+void atlas_resize(TextureAtlas* atlas, uint32_t new_capacity) {
+    uint32_t old_capacity = atlas->capacity;
+    AtlasSlot* old_slots = atlas->slots;
+    
+    atlas->capacity = new_capacity;
+    atlas->slots = calloc(atlas->capacity, sizeof(AtlasSlot));
+
+    for (uint32_t i = 0; i < old_capacity; i++) {
+        if(!old_slots[i].occupied) continue; // Slot is empty
+        
+        uint32_t new_index = old_slots[i].key_hash % atlas->capacity;
+
+        // Linear probe for free slot on hash collision
+        while (atlas->slots[new_index].occupied) {
+            new_index = (new_index + 1) % atlas->capacity;
+        }
+
+        atlas->slots[new_index] = old_slots[i];
+    }
+
+    free(old_slots);
+}
+
 void atlas_define_region(TextureAtlas* atlas, int x, int y, int w, int h, const char* name) {
-    // 1. Ensure atlas has enough free slots
-    if (atlas->count >= atlas->capacity) {
-        atlas->capacity *= 2;
-        atlas->slots = realloc(atlas->slots, sizeof(AtlasSlot) * atlas->capacity);
+    // Ensure atlas has enough free slots
+    //   This resizes the hash table if the table is at >75% capacity
+    //   This is to reduce hash collisions and subsequent probing
+    //   (capacity - (capacity >> 2)) is effectively capacity * 0.75
+    if (atlas->count >= (atlas->capacity - (atlas->capacity >> 2))) {
+        atlas_resize(atlas, atlas->capacity * 2);
     }
 
     uint32_t hash = hash_string(name);

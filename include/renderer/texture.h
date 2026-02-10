@@ -15,10 +15,22 @@ typedef struct {
     char path[256]; // Debugging
 } Texture;
 
+/*
+ * Defines the struct which is used to parse the .bin format header
+*/
+typedef struct {
+    uint32_t magic;
+    uint32_t width;
+    uint32_t height;
+    uint32_t internal_format;
+    uint32_t data_size;
+} BakedHeader;
+
 Texture* texture_load(const char* filepath, bool premultiply_alpha);
+Texture* texture_load_etc2_bin(const char* filepath);
+
 void texture_bind(Texture* texture, uint32_t slot);
 void texture_free(Texture* texture);
-
 
 #define MAX_REGION_NAME 64
 
@@ -45,7 +57,7 @@ typedef struct {
     int height;
 } TextureAtlas;
 
-TextureAtlas* atlas_create(Texture* texture);
+TextureAtlas* atlas_create(Texture* texture, uint32_t initial_capacity);
 void atlas_define_region(TextureAtlas* atlas, int x, int y, int w, int h, const char* name);
 TextureRegion* atlas_get_region(TextureAtlas* atlas, const char* name);
 void atlas_free(TextureAtlas* atlas);

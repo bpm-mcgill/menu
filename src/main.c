@@ -123,8 +123,8 @@ int main(void) {
 
     Mesh quad = mesh_build(obj, &iconshader);
 
-    Texture* tex = texture_load("assets/icons.png", true);
-    TextureAtlas* atlas = atlas_create(tex);
+    Texture* tex = texture_load_etc2_bin("assets/icons.bin");
+    TextureAtlas* atlas = atlas_create(tex, 16);
     atlas_define_region(atlas, 116, 99, 715, 746, "power");
     TextureRegion* region = atlas_get_region(atlas, "power");
     if (!region) {
