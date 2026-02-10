@@ -5,14 +5,16 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#define MAX_TEXTURE_PATH 256
+
 typedef struct {
     uint32_t id; // OpenGL binding texture id
     int width;
     int height;
     int channels;
 
-    int layer_count; // For texture arrays if needed later
-    char path[256]; // Debugging
+    //int layer_count; // For texture arrays if needed later
+    char path[MAX_TEXTURE_PATH]; // Debugging
 } Texture;
 
 /*

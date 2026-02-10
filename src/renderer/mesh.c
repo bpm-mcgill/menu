@@ -1,5 +1,6 @@
 #include "renderer/mesh.h"
 #include "renderer/shader.h"
+#include "renderer/texture.h"
 #include <GLES3/gl3.h>
 #include <cglm/io.h>
 #include <cglm/mat4.h>
@@ -189,6 +190,11 @@ void vertex_layout_apply(VertexLayout* layout) {
 
 /* ---------- MESHOBJ ---------- */
 
+// TODO: Move all of the vertex specific shit out of this file
+// 
+// The vertex should also be renamed to UIVertex
+// This vertex and funcs (gen_quad, md_apply_*) will be UI specific
+
 /*
  * Per-vertex data for creating a Quad
 */
@@ -220,10 +226,10 @@ MeshData gen_quad() {
     
     Vertex* v = (Vertex*)data.vertices;
 
-    v[0] = (Vertex){{-1.0f, -1.0f, 0.0f}, {0.01837f, 0.01344f}, {255, 255, 255, 255}};
-    v[1] = (Vertex){{ 1.0f, -1.0f, 0.0f}, {0.05242f, 0.01344f}, {255, 255, 255, 255}};
-    v[2] = (Vertex){{ 1.0f,  1.0f, 0.0f}, {0.05242f, 0.04682f}, {255, 255, 255, 255}};
-    v[3] = (Vertex){{-1.0f,  1.0f, 0.0f}, {0.01837f, 0.04682f}, {255, 255, 255, 255}};
+    v[0] = (Vertex){{-1.0f, -1.0f, 0.0f}, {0.0f, 0.0f}, {255, 255, 255, 255}};
+    v[1] = (Vertex){{ 1.0f, -1.0f, 0.0f}, {1.0f, 0.0f}, {255, 255, 255, 255}};
+    v[2] = (Vertex){{ 1.0f,  1.0f, 0.0f}, {1.0f, 1.0f}, {255, 255, 255, 255}};
+    v[3] = (Vertex){{-1.0f,  1.0f, 0.0f}, {0.0f, 1.0f}, {255, 255, 255, 255}};
     
     uint32_t indices[] = { 0, 1, 2, 2, 3, 0 };
     memcpy(data.indices, indices, sizeof(indices));
@@ -231,7 +237,33 @@ MeshData gen_quad() {
     return data;
 }
 
-void md_apply_uvs(MeshData* data, VertexLayout layout,  vec2 uvs) {
+/*
+ * Applies a texture region's uv to a MeshData (quad)
+ * This will only work on MeshData objects using the default Vertex format
+ * Specifically, this will only work with quads
+ *
+ * Useful for creating icons from a texture atlas
+*/
+void md_apply_region(MeshData* data, TextureRegion* region) {
+    if (data->vertex_count != 4) return; // 4 vertices for a quad are required
+
+    Vertex* v = (Vertex*)data->vertices;
+
+    // v[0] - Bottom-Left
+    v[0].uv[0] = region->uv_min[0]; 
+    v[0].uv[1] = region->uv_min[1];
+
+    // v[1] - Bottom-Right
+    v[1].uv[0] = region->uv_max[0]; 
+    v[1].uv[1] = region->uv_min[1];
+
+    // v[2] - Top-Right
+    v[2].uv[0] = region->uv_max[0]; 
+    v[2].uv[1] = region->uv_max[1];
+
+    // v[3] - Top-Left
+    v[3].uv[0] = region->uv_min[0]; 
+    v[3].uv[1] = region->uv_max[1];
 }
 
 void md_apply_mat4(MeshData* data, VertexLayout layout, mat4 matrix) {

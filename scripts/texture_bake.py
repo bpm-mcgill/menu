@@ -8,8 +8,6 @@ from PIL import Image
 import etcpak, os
 import struct
 
-import numpy as np
-
 def validate_file_extension(filepath, *exts):
     ext = os.path.splitext(filepath)[-1]
     if not ext.lower() in exts:

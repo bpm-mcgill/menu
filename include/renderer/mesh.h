@@ -2,6 +2,7 @@
 #define MESH_H
 
 #include "renderer/shader.h"
+#include "renderer/texture.h"
 #include <GLES3/gl3.h>
 #include <cglm/cglm.h>
 #include <cglm/types.h>
@@ -78,7 +79,7 @@ typedef struct {
 } MeshData;
 
 MeshData gen_quad();
-void md_apply_uvs(MeshData* data, VertexLayout layout, float* uvs);
+void md_apply_region(MeshData* data, TextureRegion* region);
 void md_apply_mat4(MeshData* data, VertexLayout layout, mat4 matrix);
 
 typedef int32_t MeshHandle; // Unique Mesh Registry Entry ID
@@ -147,6 +148,7 @@ typedef struct {
     UniformStore uniforms;
     
     Shader* shader;
+    Texture* texture;
 } Mesh;
 
 // Builds a MeshObj into a Mesh

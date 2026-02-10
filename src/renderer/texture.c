@@ -77,7 +77,7 @@ Texture* texture_load(const char* filepath, bool premultiply_alpha) {
 
     stbi_image_free(data);
 
-    tex->layer_count = 1;
+    //tex->layer_count = 1;
     snprintf(tex->path, 256, "%s", filepath);
 
     return tex;
@@ -142,7 +142,7 @@ Texture* texture_load_etc2_bin(const char* filepath) {
     tex->height = header.height;
     tex->channels = 4; // The compressed format only uses RGBA8
 
-    tex->layer_count = 1;
+    //tex->layer_count = 1;
     snprintf(tex->path, 256, "%s", filepath);
     
     return tex;

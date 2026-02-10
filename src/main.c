@@ -3,6 +3,7 @@
 #include "SDL_platform.h"
 #include "SDL_timer.h"
 #include "SDL_video.h"
+#include "renderer/font.h"
 #include "renderer/mesh.h"
 #include "renderer/shader.h"
 #include "renderer/texture.h"
@@ -14,6 +15,9 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <stdlib.h>
+
+#define STB_TRUETYPE_IMPLEMENTATION
+#include "stb_truetype.h"
 
 bool init();
 void cleanup();
@@ -91,8 +95,44 @@ int main(void) {
                   "/home/user/Documents/sdlmenu/shaders/iconvert.glsl",
                   "/home/user/Documents/sdlmenu/shaders/iconfrag.glsl"
     );
+    
+    Shader textshader;
+    shader_create(&textshader, 
+                  "/home/user/Documents/sdlmenu/shaders/msdf-v.glsl",
+                  "/home/user/Documents/sdlmenu/shaders/msdf-f.glsl"
+    );
 
+    
+    
+    // ----------- FONT BATCH -----------
+    //Font* rodin_bold = font_load("assets/Rodin-Bold.ttf", 64.0f);
+    Font* rodin_bold = font_load_bin("assets/Rodin-Bold.bin");
+    TextParams params = {
+        .color = {1.0f,1.0f,1.0f,1.0f}, 
+        .scale = 64.0f,
+        .softness = 4.0f
+    };
+    MeshData txt = font_generate_mesh_data(rodin_bold, "Bitch ass", params);
+    
+    VertexLayout flayout = {0};
+    vertex_layout_add(&flayout, 0, 2, GL_FLOAT, false);
+    vertex_layout_add(&flayout, 1, 2, GL_FLOAT, false);
+    vertex_layout_add(&flayout, 2, 4, GL_FLOAT, false);
+    MeshObj* txtobj = mesh_obj_create(0, 0, flayout, true);
+    MeshHandle txthand = mesh_obj_push(txtobj, txt);
+    
+    mat4 txtmod; glm_mat4_identity(txtmod);
+    vec3 positionz = { 100.0f, 200.0f, 0.0f };
+    glm_translate(txtmod, positionz);
+    uniform_store_add(&txtobj->uniforms, "u_model", UNI_MAT4, (void*)txtmod);
+    int texdid = 1;
+    uniform_store_add(&txtobj->uniforms, "u_tex", UNI_INT, &texdid);
+    uniform_store_add(&txtobj->uniforms, "u_pxRange", UNI_FLOAT, &params.softness);
+    
+    Mesh txtmesh = mesh_build(txtobj, &textshader); 
 
+    // ------------ IDK SHIT --------------------
+    
     VertexLayout layout = {0};
     vertex_layout_add(&layout, 0, 3, GL_FLOAT, false);
     vertex_layout_add(&layout, 1, 2, GL_FLOAT, false);
@@ -101,15 +141,23 @@ int main(void) {
     MeshObj* obj = mesh_obj_create(0, 0, layout, true);
     
     mat4 mod; glm_mat4_identity(mod);
-    int texid = 1;
     uniform_store_add(&obj->uniforms, "u_model", UNI_MAT4, (void*)mod);
+    int texid = 1;
     uniform_store_add(&obj->uniforms, "u_tex", UNI_INT, &texid);
 
     MeshData mdat = gen_quad();
     //mesh_obj_push(obj, mdat);
     MeshHandle hand = mesh_obj_push(obj, mdat);
     printf("Handle: %d\n", (int)hand);
-    
+
+    Texture* tex = texture_load_etc2_bin("assets/icons.bin");
+    TextureAtlas* atlas = atlas_create(tex, 16);
+    atlas_define_region(atlas, 116, 99, 215, 248, "power");
+    TextureRegion* region = atlas_get_region(atlas, "power");
+    if (!region) {
+        printf("Couldn't find region!!\n");
+    }
+
     mat4 mod2; glm_mat4_identity(mod2);
     vec3 position2 = { 200.0f, 200.0f, 0.0f };
     glm_translate(mod2, position2);
@@ -117,26 +165,14 @@ int main(void) {
     glm_scale(mod2, size2);
     MeshData dat2 = mesh_obj_get_data(obj, hand);
     md_apply_mat4(&dat2, obj->layout, mod2); 
-    
-    printf("sizeof MeshObj type: %lu\n", sizeof(MeshObj));
-    printf("sizeof Mesh type: %lu\n", sizeof(Mesh));
+    md_apply_region(&dat2, region);
 
     Mesh quad = mesh_build(obj, &iconshader);
 
-    Texture* tex = texture_load_etc2_bin("assets/icons.bin");
-    TextureAtlas* atlas = atlas_create(tex, 16);
-    atlas_define_region(atlas, 116, 99, 715, 746, "power");
-    TextureRegion* region = atlas_get_region(atlas, "power");
-    if (!region) {
-        printf("Couldn't find region!!\n");
-    }
-    glm_vec2_print(region->uv_min, stderr);
-    glm_vec2_print(region->uv_max, stderr);
     //mesh_obj_destroy(obj); 
 
     MeshObj* fboobj = mesh_obj_create_quad();
     Mesh fboquad = mesh_build(fboobj, &fbshader);
-
     // Framebuffer Object
     unsigned int fbo, fbotex;
     glGenFramebuffers(1, &fbo);
@@ -160,15 +196,6 @@ int main(void) {
     // Create 2D projection matrix
     mat4 projection;
     glm_ortho(0.0f, SCREEN_WIDTH, SCREEN_HEIGHT, 0.0f, -1.0f, 1.0f, projection);
-
-    // Create model matrix for icon
-    /*
-    mat4* model = (mat4*)mesh_get_uniform(&quad, "u_model");
-    vec3 position = { SCREEN_HEIGHT/2.0, SCREEN_WIDTH/2.0, 0.0f };
-    glm_translate(*model, position);
-    vec3 size = { 64.0f, 64.0f, 1.0f };
-    glm_scale(*model, size);
-    */
 
     SDL_Event e;
     bool quit = false;
@@ -234,6 +261,14 @@ int main(void) {
         uniform_store_apply(&quad.uniforms, &iconshader);
         set_uniform_mat4(&iconshader, "u_projection", projection);
         glDrawElements(GL_TRIANGLES, quad.index_count, GL_UNSIGNED_INT, 0);
+
+        // -------- DRAW TEXT BATCH --------
+        shader_use(&textshader);
+        mesh_bind(&txtmesh);
+        texture_bind(rodin_bold->texture, 1);
+        uniform_store_apply(&txtmesh.uniforms, &textshader);
+        set_uniform_mat4(&textshader, "u_projection", projection);
+        glDrawElements(GL_TRIANGLES, txtmesh.index_count, GL_UNSIGNED_INT, 0);
 
         SDL_GL_SwapWindow(gwindow);
     }
