@@ -8,13 +8,11 @@ out vec4 fragColor;
 uniform sampler2D u_tex;
 
 void main() {
-    // We used GL_R8, so look in the .r channel
+    // Used GL_R8, so data in .r channel
     float mask = texture(u_tex, TexCoords).r;
     
-    // Standard Bitmap alpha masking
-    // (If you switch to true SDF, replace 'mask' with smoothstep logic)
+    // Bitmap alpha masking
     fragColor = vec4(Color.rgb, Color.a * mask);
-    //fragColor = vec4(1.0f,1.0f,1.0f,1.0f);
     
     if (fragColor.a < 0.05) discard;
 }

@@ -78,6 +78,8 @@ int main(void) {
         return 1;
     }
     
+    // -------- SHADERS --------
+
     Shader shader;
     shader_create(&shader, 
                   "/home/user/Documents/sdlmenu/shaders/basicvert.glsl",
@@ -98,8 +100,9 @@ int main(void) {
     
     Shader textshader;
     shader_create(&textshader, 
-                  "/home/user/Documents/sdlmenu/shaders/msdf-v.glsl",
+                  "/home/user/Documents/sdlmenu/shaders/text-v.glsl",
                   "/home/user/Documents/sdlmenu/shaders/msdf-f.glsl"
+                  //"/home/user/Documents/sdlmenu/shaders/textfrag.glsl"
     );
 
     
@@ -109,10 +112,10 @@ int main(void) {
     Font* rodin_bold = font_load_bin("assets/Rodin-Bold.bin");
     TextParams params = {
         .color = {1.0f,1.0f,1.0f,1.0f}, 
-        .scale = 64.0f,
-        .softness = 4.0f
+        .size = 64.0f,
+        .softness = 0.03f
     };
-    MeshData txt = font_generate_mesh_data(rodin_bold, "Bitch ass", params);
+    MeshData txt = font_generate_mesh_data(rodin_bold, "AV Wa", params);
     
     VertexLayout flayout = {0};
     vertex_layout_add(&flayout, 0, 2, GL_FLOAT, false);
@@ -127,7 +130,8 @@ int main(void) {
     uniform_store_add(&txtobj->uniforms, "u_model", UNI_MAT4, (void*)txtmod);
     int texdid = 1;
     uniform_store_add(&txtobj->uniforms, "u_tex", UNI_INT, &texdid);
-    uniform_store_add(&txtobj->uniforms, "u_pxRange", UNI_FLOAT, &params.softness);
+    uniform_store_add(&txtobj->uniforms, "u_pxrange", UNI_FLOAT, &rodin_bold->px_range);
+    uniform_store_add(&txtobj->uniforms, "u_softness", UNI_FLOAT, &params.softness);
     
     Mesh txtmesh = mesh_build(txtobj, &textshader); 
 
@@ -170,6 +174,8 @@ int main(void) {
     Mesh quad = mesh_build(obj, &iconshader);
 
     //mesh_obj_destroy(obj); 
+    
+    // -------- FRAME BUFFER SETUP -----------
 
     MeshObj* fboobj = mesh_obj_create_quad();
     Mesh fboquad = mesh_build(fboobj, &fbshader);
@@ -192,6 +198,7 @@ int main(void) {
         printf("FBO failed to complete\n");
     }
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    
 
     // Create 2D projection matrix
     mat4 projection;
@@ -222,13 +229,14 @@ int main(void) {
         }
         float time = SDL_GetTicks() * 0.001f;
         
+        // -------- FRAME BUFFFER --------
         // Bind framebuffer to draw to
         glBindFramebuffer(GL_FRAMEBUFFER, fbo);
         glViewport(0, 0, 320, 240);
         glClearColor(0.05f, 0.08f, 0.12f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
 
-        // Draw framebuffer quad
+        // Draw framebuffer quad (wave shader)
         shader_use(&shader);
         mesh_bind(&fboquad);
         set_uniform_1f(&shader, "u_time", time);
@@ -241,7 +249,7 @@ int main(void) {
         glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
         
-        // Draw framebuffer quad
+        // Draw framebuffer quad (draws waves to default framebuffer)
         glUseProgram(0);
         shader_use(&fbshader);
         glActiveTexture(GL_TEXTURE0);
@@ -249,13 +257,14 @@ int main(void) {
         set_uniform_1i(&fbshader, "u_texture", 0);
         glDrawElements(GL_TRIANGLES, fboquad.index_count, GL_UNSIGNED_INT, 0);
         
+        // -------- DRAW ICON ---------
+
         // Draw icon quad
         shader_use(&iconshader);
         //glm_mat4_identity(mod2);
         //glm_rotate(mod2, 0.01f, (vec3){0,0,1});
         //mesh_obj_transform(obj, hand, mod2);
         //mesh_update_gpu(&quad, obj); 
-        
         mesh_bind(&quad);
         texture_bind(tex, 1);
         uniform_store_apply(&quad.uniforms, &iconshader);

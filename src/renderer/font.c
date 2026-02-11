@@ -6,6 +6,8 @@
 #include <stdio.h>
 #include <string.h>
 
+// TODO: Add font kerning support
+
 Font* font_load(const char* ttf_path, float font_size) {
     // 1. Read the TTF file info memory
     FILE* f = fopen(ttf_path, "rb");
@@ -31,6 +33,7 @@ Font* font_load(const char* ttf_path, float font_size) {
     font->pixel_height = font_size;
     font->atlas_w = FONT_ATLAS_WIDTH;
     font->atlas_h = FONT_ATLAS_HEIGHT;
+    font->gen_size = font_size;
 
     // 4. Bake the font into a bitmap
     int result = stbtt_BakeFontBitmap(
@@ -108,11 +111,18 @@ Font* font_load(const char* ttf_path, float font_size) {
     return font;
 }
 
+/*
+ * Used for reading the .bin font file header
+*/
 typedef struct {
     char magic[4];
+    float size;        // The font size the atlas was generated at
     float px_range;
-    uint32_t w; // Atlas width
-    uint32_t h; // Atlas height
+    uint32_t w;        // Atlas width
+    uint32_t h;        // Atlas height
+    float line_height; // Vertical spacing
+    float ascent;      // Max height above baseline
+    float descent;     // Max depth below baseline
     uint32_t glyph_count;
 } FontHeader;
 
@@ -147,10 +157,11 @@ Font* font_load_bin(const char* path) {
     font->atlas_h = (float)header.h;
     font->texture->width = header.w;
     font->texture->height = header.h;
-
-    font->pixel_height = 32.0f;
-    font->ascent = 32.0f;
-    font->descent = 0.0f;
+    
+    font->pixel_height = header.line_height;
+    font->ascent = header.ascent;
+    font->descent = header.descent;
+    font->gen_size = header.size;
 
     // 5. Read Glyph Table (96 entries)
     size_t glyphs_read = fread(font->data.msdf, sizeof(Glyph), header.glyph_count, f);
@@ -202,7 +213,11 @@ Font* font_load_bin(const char* path) {
     return font;
 }
 
-void font_destroy(Font* font);
+void font_destroy(Font* font) {
+    if (!font) return;
+    free(font->texture);
+    free(font);
+}
 
 typedef struct {
     vec2 pos;
@@ -243,38 +258,36 @@ MeshData font_generate_mesh_data(Font* font, const char* text, TextParams params
             Glyph* g = &font->data.msdf[glyph_idx];
 
             // 1. Calculate Screen Coordinates
-            // Plane bounds are normalized (0.0 to 1.0 relative to font size), 
-            // so we multiply by params.scale.
-            // Note: In Y-Down (UI), "Top" means Subtract, "Bottom" means Add.
+            // Plane bounds are normalized (0.0 to 1.0 relative to font size), so they are mutliplied by size
             
             // Left & Right
-            x0 = x + (g->plane_l * params.scale);
-            x1 = x + (g->plane_r * params.scale);
+            x0 = x + (g->plane_l * params.size);
+            x1 = x + (g->plane_r * params.size);
 
-            // Top & Bottom (Assuming Y-Down coordinate system)
+            // Top & Bottom
             // g->plane_t is usually positive (distance UP from baseline)
-            y0 = y - (g->plane_t * params.scale); 
-            y1 = y - (g->plane_b * params.scale); 
+            y0 = y - (g->plane_t * params.size); 
+            y1 = y - (g->plane_b * params.size); 
 
             // 2. Calculate UVs (Normalized)
             u0 = g->atlas_l * inv_w;
-            v0 = g->atlas_b * inv_h; // Depending on atlas gen, T/B might be swapped
+            v0 = g->atlas_b * inv_h;
             u1 = g->atlas_r * inv_w;
             v1 = g->atlas_t * inv_h;
 
             // 3. Advance Cursor
-            x += g->advance * params.scale;
+            x += g->advance * params.size;
         }
         else {
-            stbtt_bakedchar* b = &font->data.bitmap[glyph_idx];
             stbtt_aligned_quad q;
 
             stbtt_GetBakedQuad(font->data.bitmap, font->atlas_w, font->atlas_h, glyph_idx, &x, &y, &q, 1);
-
-            float s = params.scale;
-            if (s != 1.0f) {
-                q.x0 *= s; q.y0 *= s;
-                q.x1 *= s; q.y1 *= s;
+            
+            // Scale needs to be calculated so it can to relative to the base bitmap atlas
+            float scale = params.size / font->gen_size;
+            if (scale != 1.0f) {
+                q.x0 *= scale; q.y0 *= scale;
+                q.x1 *= scale; q.y1 *= scale;
             }
 
             x0 = q.x0; x1 = q.x1;
@@ -289,19 +302,19 @@ MeshData font_generate_mesh_data(Font* font, const char* text, TextParams params
 
         // Vert 0: Bottom-Left (x0, y1)
         glm_vec2_copy((vec2){x0, y1}, verts[v_start + 0].pos);
-        glm_vec2_copy((vec2){u0, v0}, verts[v_start + 0].uv); // Use Bottom V
+        glm_vec2_copy((vec2){u0, v1}, verts[v_start + 0].uv);
 
         // Vert 1: Bottom-Right (x1, y1)
         glm_vec2_copy((vec2){x1, y1}, verts[v_start + 1].pos);
-        glm_vec2_copy((vec2){u1, v0}, verts[v_start + 1].uv); // Use Bottom V
+        glm_vec2_copy((vec2){u1, v1}, verts[v_start + 1].uv);
 
         // Vert 2: Top-Right (x1, y0)
         glm_vec2_copy((vec2){x1, y0}, verts[v_start + 2].pos);
-        glm_vec2_copy((vec2){u1, v1}, verts[v_start + 2].uv); // Use Top V
+        glm_vec2_copy((vec2){u1, v0}, verts[v_start + 2].uv);
 
         // Vert 3: Top-Left (x0, y0)
         glm_vec2_copy((vec2){x0, y0}, verts[v_start + 3].pos);
-        glm_vec2_copy((vec2){u0, v1}, verts[v_start + 3].uv); // Use Top V
+        glm_vec2_copy((vec2){u0, v0}, verts[v_start + 3].uv);
 
         // Apply color to all 4 vertices
         for (int k = 0; k < 4; k++) {
@@ -319,12 +332,14 @@ MeshData font_generate_mesh_data(Font* font, const char* text, TextParams params
         
         q_idx++;
     }
+    
+    // Update the final counts
+    //   If a char was skipped because it was unsupported, the counts will be wrong
+    //   So the counts need to be updated based on the actual working quads generated
+    md.vertex_count = len * 4;
+    md.index_count = len * 6;
+    md.vertices = realloc(md.vertices, md.vertex_count * sizeof(Vertex));
+    md.indices = realloc(md.indices, md.index_count * sizeof(uint32_t));
 
     return md;
 }
-
-
-// High Level Label API
-void text_label_init(TextLabel* label, MeshObj* batch, Font* font);
-void text_label_set(TextLabel* label, const char* text, TextParams);
-void text_label_destroy(TextLabel* label);

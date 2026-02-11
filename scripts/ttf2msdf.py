@@ -1,3 +1,12 @@
+# Script to take a .ttf file and convert it to a MSDF .bin file
+# 
+# This requires `msdf-atlas-gen` to be installed
+#  https://github.com/Chlumsky/msdf-atlas-gen
+#
+# Generates the msdf atlas and metrics json, then packs the metrics into a byte header
+#  and generates a glyph table for all of the supported chars in the header.
+#  The atlas image data follows the header.
+
 import struct, json, subprocess, os, argparse 
 from PIL import Image
 
@@ -8,7 +17,6 @@ def build_font(ttf_path, output_bin, size=32, px_range=4):
     filename = os.path.basename(ttf_path).split(".")[0]
     out_dir = os.path.dirname(output_bin)
     
-    # FIX 1: Use os.path.join for safe pathing
     temp_json = os.path.join(out_dir, filename + ".json")
     temp_png = os.path.join(out_dir, filename + ".png")
 
@@ -35,23 +43,35 @@ def build_font(ttf_path, output_bin, size=32, px_range=4):
         with open(temp_json, "r") as f:
             data = json.load(f)
         
-        # FIX 2: Flip the image vertically. 
+        # Flip the image vertically. 
         # This makes the PIL buffer match OpenGL's bottom-up coordinate system.
-        img = Image.open(temp_png).convert("RGB").transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+        img = Image.open(temp_png).convert("RGB")#.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+        h = img.height
         pixels = img.tobytes()
 
         glyphs = { g["unicode"]: g for g in data["glyphs"] }
 
         with open(output_bin, "wb") as f:
-            # Header (20 bytes)
-            header = struct.pack("4s f I I I", b'FONT', float(px_range), img.width, img.height, 96)
+            metrics = data["metrics"]
+            # Header
+            header = struct.pack("4s ff II fff I", 
+                                 b'FONT',
+                                 float(size),
+                                 float(px_range),
+                                 img.width,
+                                 img.height,
+                                 metrics["lineHeight"],
+                                 metrics["ascender"],
+                                 metrics["descender"],
+                                 96)
             f.write(header)
             
             for i in range(32, 128):
+                # 63 is ASCII '?'. Used as a placeholder for unsupported/unknown characters
                 g = glyphs.get(i, glyphs.get(63, None))
                 advance = 0.0
-                pb = [0.0] * 4 # planeBounds
-                ab = [0.0] * 4 # atlasBounds
+                pb = [0.0] * 4 # planeBounds (vertex pos)
+                ab = [0.0] * 4 # atlasBounds (uvs)
 
                 if g:
                     advance = g.get("advance", 0.0)
@@ -60,7 +80,11 @@ def build_font(ttf_path, output_bin, size=32, px_range=4):
                         pb = [b["left"], b["bottom"], b["right"], b["top"]]
                     if "atlasBounds" in g:
                         b = g["atlasBounds"]
-                        ab = [b["left"], b["bottom"], b["right"], b["top"]]
+                        ab_left   = b["left"]
+                        ab_right  = b["right"]
+                        ab_top    = h - b["bottom"] # Swapped and inverted
+                        ab_bottom = h - b["top"]    # Swapped and inverted
+                        ab = [ab_left, ab_bottom, ab_right, ab_top]
 
                 # Pack 9 floats (36 bytes per glyph)
                 f.write(struct.pack("f ffff ffff", advance, *pb, *ab))

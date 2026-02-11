@@ -6,6 +6,8 @@
 #include "stb_truetype.h"
 #include <cglm/types.h>
 
+// Bitmap font atlas dimensions
+//   If a big font size is to be used, this needs to be larger to fit
 #define FONT_ATLAS_WIDTH 512
 #define FONT_ATLAS_HEIGHT 512
 
@@ -14,10 +16,11 @@ typedef enum {
     FONT_TYPE_MSDF
 } FontType;
 
+/* MSDF Glyph data */
 typedef struct {
     float advance;
-    float plane_l, plane_b, plane_r, plane_t;
-    float atlas_l, atlas_b, atlas_r, atlas_t;
+    float plane_l, plane_b, plane_r, plane_t; // Vertex pos
+    float atlas_l, atlas_b, atlas_r, atlas_t; // UVs
 } Glyph;
 
 typedef struct {
@@ -29,6 +32,7 @@ typedef struct {
     float ascent;
     float descent;
     float line_gap;
+    float gen_size;      // The size the bitmap or MSDF font was generated at
 
     // MSDF font data
     float px_range;      // The spread/softness range
@@ -46,10 +50,9 @@ typedef struct {
 
 typedef struct {
     vec4 color;
-    float scale;      // 1.0 = pixel_height size
-    float softness;   // SDF shader softness (0.0 hard edge, 1.0 = blurry)
-    float wrap_width; // 0 = no wrap
-    bool center_align;
+    float size;       // The target font size.
+                      //  - Will scale the atlas based on gen_size (target_size / gen_size)
+    float softness;   // MSDF shader softness (0.0 hard edge, 1.0 = blurry)
 } TextParams;
 
 typedef struct {
@@ -70,10 +73,5 @@ void font_destroy(Font* font);
 
 // Converts String -> MeshData
 MeshData font_generate_mesh_data(Font* font, const char* text, TextParams params);
-
-// High Level Label API
-void text_label_init(TextLabel* label, MeshObj* batch, Font* font);
-void text_label_set(TextLabel* label, const char* text, TextParams);
-void text_label_destroy(TextLabel* label);
 
 #endif // !FONT_H
