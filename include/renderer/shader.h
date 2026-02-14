@@ -5,36 +5,28 @@
 #include <cglm/cglm.h>
 #include <cglm/types.h>
 #include <stdbool.h>
+#include <stdint.h>
+#include "utils/handles.h"
 
 #define MAX_UNIFORMS 16
 #define MAX_SHADER_PATH 256
 
-typedef struct {
-    char name[32]; // GLSL uniform name
-    unsigned int location; // Cached uniform location
-} Uniform;
+// INFO: Defined in shader_internal.h
+typedef struct Uniform Uniform;
+typedef struct Shader Shader;
 
-typedef struct {
-    unsigned int id;
-    
-    // Paths stored for hot-reloading
-    char vert_path[MAX_SHADER_PATH];
-    char frag_path[MAX_SHADER_PATH];
+// ShaderHandle
+DECLARE_HANDLE(ShaderHandle);
 
-    Uniform uniforms[MAX_UNIFORMS]; // 16 = max uniforms per shader
-    int uniform_count;
-} Shader;
+// Allocates the internal flex array and loads internal shaders
+void shaders_init();
 
-bool shader_create(Shader* shader, const char* vertex_path, const char* fragment_path);
-void shader_use(Shader* shader);
-void shader_destroy(Shader* shader);
-bool shader_reload(Shader* shader);
+ShaderHandle shader_create(const char* vertex_path, const char* fragment_path);
+void shader_use(ShaderHandle handle);
+void shader_delete(ShaderHandle handle);
+void shader_reload(ShaderHandle handle);
 
-int get_uniform_location(Shader* shader, const char* name); // -1 means not found
-
-void set_uniform_1f(Shader* shader, const char* name, float f);
-void set_uniform_1i(Shader* shader, const char* name, int i);
-void set_uniform_vec2f(Shader* shader, const char* name, vec2 f);
-void set_uniform_mat4(Shader* shader, const char* name, mat4 m);
+/* Gets the cached location of a uniform */
+int shader_get_uniform_loc(ShaderHandle handle, const char* name); // -1 means not found
 
 #endif // !SHADER_H

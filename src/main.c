@@ -16,8 +16,8 @@
 #include <stdbool.h>
 #include <stdlib.h>
 
-#define STB_TRUETYPE_IMPLEMENTATION
-#include "stb_truetype.h"
+// Here until the renderer is built
+#include "shader_internal.h"
 
 bool init();
 void cleanup();
@@ -80,26 +80,24 @@ int main(void) {
     
     // -------- SHADERS --------
 
-    Shader shader;
-    shader_create(&shader, 
+    shaders_init();
+
+    ShaderHandle shader = shader_create(
                   "/home/user/Documents/sdlmenu/shaders/basicvert.glsl",
                   "/home/user/Documents/sdlmenu/shaders/waves.glsl"
     );
     
-    Shader fbshader;
-    shader_create(&fbshader, 
+    ShaderHandle fbshader = shader_create(
                   "/home/user/Documents/sdlmenu/shaders/fbovert.glsl",
                   "/home/user/Documents/sdlmenu/shaders/fbofrag.glsl"
     );
 
-    Shader iconshader;
-    shader_create(&iconshader, 
+    ShaderHandle iconshader = shader_create( 
                   "/home/user/Documents/sdlmenu/shaders/iconvert.glsl",
                   "/home/user/Documents/sdlmenu/shaders/iconfrag.glsl"
     );
     
-    Shader textshader;
-    shader_create(&textshader, 
+    ShaderHandle textshader = shader_create(
                   "/home/user/Documents/sdlmenu/shaders/text-v.glsl",
                   "/home/user/Documents/sdlmenu/shaders/msdf-f.glsl"
                   //"/home/user/Documents/sdlmenu/shaders/textfrag.glsl"
@@ -133,7 +131,7 @@ int main(void) {
     uniform_store_add(&txtobj->uniforms, "u_pxrange", UNI_FLOAT, &rodin_bold->px_range);
     uniform_store_add(&txtobj->uniforms, "u_softness", UNI_FLOAT, &params.softness);
     
-    Mesh txtmesh = mesh_build(txtobj, &textshader); 
+    Mesh txtmesh = mesh_build(txtobj, textshader); 
 
     // ------------ IDK SHIT --------------------
     
@@ -171,14 +169,14 @@ int main(void) {
     md_apply_mat4(&dat2, obj->layout, mod2); 
     md_apply_region(&dat2, region);
 
-    Mesh quad = mesh_build(obj, &iconshader);
+    Mesh quad = mesh_build(obj, iconshader);
 
     //mesh_obj_destroy(obj); 
     
     // -------- FRAME BUFFER SETUP -----------
 
     MeshObj* fboobj = mesh_obj_create_quad();
-    Mesh fboquad = mesh_build(fboobj, &fbshader);
+    Mesh fboquad = mesh_build(fboobj, fbshader);
     // Framebuffer Object
     unsigned int fbo, fbotex;
     glGenFramebuffers(1, &fbo);
@@ -237,10 +235,11 @@ int main(void) {
         glClear(GL_COLOR_BUFFER_BIT);
 
         // Draw framebuffer quad (wave shader)
-        shader_use(&shader);
+        Shader* s = Shader_get(shader);
+        shader_use(shader);
         mesh_bind(&fboquad);
-        set_uniform_1f(&shader, "u_time", time);
-        set_uniform_vec2f(&shader, "u_resolution", (vec2){320, 240});
+        set_uniform_1f(s, "u_time", time);
+        set_uniform_vec2f(s, "u_resolution", (vec2){320, 240});
         glDrawElements(GL_TRIANGLES, fboquad.index_count, GL_UNSIGNED_INT, 0);
 
         // Switch to default Framebuffer
@@ -251,40 +250,43 @@ int main(void) {
         
         // Draw framebuffer quad (draws waves to default framebuffer)
         glUseProgram(0);
-        shader_use(&fbshader);
+        s = Shader_get(fbshader);
+        shader_use(fbshader);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, fbotex);
-        set_uniform_1i(&fbshader, "u_texture", 0);
+        set_uniform_1i(s, "u_texture", 0);
         glDrawElements(GL_TRIANGLES, fboquad.index_count, GL_UNSIGNED_INT, 0);
         
         // -------- DRAW ICON ---------
 
         // Draw icon quad
-        shader_use(&iconshader);
+        shader_use(iconshader);
+        s = Shader_get(iconshader);
         //glm_mat4_identity(mod2);
         //glm_rotate(mod2, 0.01f, (vec3){0,0,1});
         //mesh_obj_transform(obj, hand, mod2);
         //mesh_update_gpu(&quad, obj); 
         mesh_bind(&quad);
         texture_bind(tex, 1);
-        uniform_store_apply(&quad.uniforms, &iconshader);
-        set_uniform_mat4(&iconshader, "u_projection", projection);
+        uniform_store_apply(&quad.uniforms, s);
+        set_uniform_mat4(s, "u_projection", projection);
         glDrawElements(GL_TRIANGLES, quad.index_count, GL_UNSIGNED_INT, 0);
 
         // -------- DRAW TEXT BATCH --------
-        shader_use(&textshader);
+        shader_use(textshader);
+        s = Shader_get(textshader);
         mesh_bind(&txtmesh);
         texture_bind(rodin_bold->texture, 1);
-        uniform_store_apply(&txtmesh.uniforms, &textshader);
-        set_uniform_mat4(&textshader, "u_projection", projection);
+        uniform_store_apply(&txtmesh.uniforms, s);
+        set_uniform_mat4(s, "u_projection", projection);
         glDrawElements(GL_TRIANGLES, txtmesh.index_count, GL_UNSIGNED_INT, 0);
 
         SDL_GL_SwapWindow(gwindow);
     }
     
-    shader_destroy(&shader);
-    shader_destroy(&fbshader);
-    shader_destroy(&iconshader);
+    shader_delete(shader);
+    shader_delete(fbshader);
+    shader_delete(iconshader);
     cleanup();
 
     return 0;

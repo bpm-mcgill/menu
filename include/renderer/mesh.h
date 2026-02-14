@@ -147,12 +147,12 @@ typedef struct {
     VertexLayout layout; // Still stored for debugging
     UniformStore uniforms;
     
-    Shader* shader;
+    ShaderHandle shader;
     Texture* texture;
 } Mesh;
 
 // Builds a MeshObj into a Mesh
-Mesh mesh_build(MeshObj* obj, Shader* shader);
+Mesh mesh_build(MeshObj* obj, ShaderHandle shader);
 void mesh_bind(Mesh* mesh);
 void* mesh_get_uniform(Mesh* mesh, const char* name);
 void mesh_update_gpu(Mesh* mesh, MeshObj* obj);

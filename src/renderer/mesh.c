@@ -1,6 +1,7 @@
 #include "renderer/mesh.h"
 #include "renderer/shader.h"
 #include "renderer/texture.h"
+#include "shader_internal.h"
 #include <GLES3/gl3.h>
 #include <cglm/io.h>
 #include <cglm/mat4.h>
@@ -649,7 +650,7 @@ void mesh_obj_destroy(MeshObj *obj) {
  * Clears the UniformStore of the MeshObj passed in, 
  *  so that a subsequent mesh_obj_destroy doesn't free the live data in the store
 */
-Mesh mesh_build(MeshObj* obj, Shader* shader) {
+Mesh mesh_build(MeshObj* obj, ShaderHandle shader) {
     Mesh mesh = {0};
     mesh.layout = obj->layout;
     mesh.uniforms = obj->uniforms;

@@ -6,6 +6,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#define STB_TRUETYPE_IMPLEMENTATION
+#include "stb_truetype.h"
+
+
 // TODO: Add font kerning support
 
 Font* font_load(const char* ttf_path, float font_size) {
