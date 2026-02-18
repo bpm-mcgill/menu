@@ -1,6 +1,8 @@
 #include "renderer/font.h"
-#include "renderer/mesh.h"
+#include "engine.h"
+#include "renderer/vertex.h"
 #include "renderer/texture.h"
+#include "utils/handles.h"
 #include <GLES3/gl3.h>
 #include <cglm/vec2.h>
 #include <stdio.h>
@@ -9,15 +11,42 @@
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb_truetype.h"
 
-
 // TODO: Add font kerning support
 
-Font* font_load(const char* ttf_path, float font_size) {
+/*
+ * Internal font management
+*/
+DEFINE_RESOURCE_POOL(Font, FontHandle, FontArray);
+
+/* -------- System Initialization -------- */
+
+void fonts_init() {
+    if (_Font_pool.items == NULL) {
+        _Font_pool.items = FontArray_create(16);
+        _Font_pool.free_list = IndexArray_create(16);
+
+        // TODO: Make the fallback a simple bitmap font
+        Font fallback = { .active = true, .generation = 0, .type = FONT_TYPE_BITMAP };
+        _Font_pool.items = FontArray_push(_Font_pool.items, fallback);
+        
+        LOG_INFO("Font Resource: Initialized (Capacity: %u, Pool: %p)",
+                _Font_pool.items->capacity, (void*)&_Font_pool);
+    }
+    else {
+        LOG_WARN("Attempted to reinitialize fonts resource. Ignoring.");
+    }
+}
+
+/* -------- Asset Loading -------- */
+
+FontHandle font_load(const char* ttf_path, float font_size) {
+    ENGINE_ASSERT(ttf_path != NULL, "font_load called with NULL path");
+
     // 1. Read the TTF file info memory
     FILE* f = fopen(ttf_path, "rb");
-    if (!f) {
-        fprintf(stderr, "Error: Failed to open font file: %s\n", ttf_path);
-        return NULL;
+    if (UNLIKELY(!f)) {
+        LOG_ERROR("Failed to open font file: '%s'", ttf_path);
+        return FontHandle_null();
     }
 
     fseek(f, 0, SEEK_END);
@@ -25,19 +54,32 @@ Font* font_load(const char* ttf_path, float font_size) {
     fseek(f, 0, SEEK_SET);
 
     unsigned char* ttf_buffer = (unsigned char*)malloc(f_size);
-    fread(ttf_buffer, 1, f_size, f);
+    ENGINE_ASSERT(ttf_buffer != NULL, "Out of memory allocating TTF buffer");
+    
+    if (UNLIKELY(fread(ttf_buffer, 1, f_size, f) != (size_t)f_size)) {
+        LOG_ERROR("Failed to read entire font file: '%s'", ttf_path);
+        free(ttf_buffer);
+        fclose(f);
+        return FontHandle_null();
+    }
     fclose(f);
 
     // 2. Allocate memory for the bitmap
     unsigned char* temp_bitmap = (unsigned char*)malloc(FONT_ATLAS_WIDTH * FONT_ATLAS_HEIGHT);
 
     // 3. Allocate the Font struct
-    Font* font = (Font*)calloc(1, sizeof(Font));
-    font->type = FONT_TYPE_BITMAP;
-    font->pixel_height = font_size;
-    font->atlas_w = FONT_ATLAS_WIDTH;
-    font->atlas_h = FONT_ATLAS_HEIGHT;
-    font->gen_size = font_size;
+    Font font = {
+        .active = true,
+        .type = FONT_TYPE_BITMAP,
+        .px_range = 0,
+        .atlas_w = FONT_ATLAS_WIDTH,
+        .atlas_h = FONT_ATLAS_HEIGHT,
+        .pixel_height = font_size,
+        .ascent = font_size,
+        .descent = 0,
+        .gen_size = font_size,
+        .line_gap = 0
+    };
 
     // 4. Bake the font into a bitmap
     int result = stbtt_BakeFontBitmap(
@@ -49,29 +91,23 @@ Font* font_load(const char* ttf_path, float font_size) {
         FONT_ATLAS_HEIGHT,
         32,
         96,
-        font->data.bitmap
+        font.data.bitmap
     );
 
     if (result <= 0) {
-        fprintf(stderr, "Error: Failed to bake font bitmap.\n");
+        LOG_ERROR("Failed to bake font bitmap: '%s'", ttf_path);
         free(ttf_buffer);
         free(temp_bitmap);
-        free(font->texture);
-        free(font);
-        return NULL;
+        return FontHandle_null();
     }
 
-    // 5. Allocate a new texture for the bitmap
-    font->texture = calloc(1, sizeof(Texture));
-    font->texture->width = FONT_ATLAS_WIDTH;
-    font->texture->height = FONT_ATLAS_HEIGHT;
-    font->texture->channels = 1; // Only red channel for fonts
-    snprintf(font->texture->path, MAX_TEXTURE_PATH, "%s", ttf_path); // Copy ttf path to texture path
+    TextureHandle texture = texture_new(FONT_ATLAS_WIDTH, FONT_ATLAS_HEIGHT, GL_R8);
+    font.texture = texture;
 
-    // 6. Turn bitmap into a texture
-    glGenTextures(1, &font->texture->id);
-    glBindTexture(GL_TEXTURE_2D, font->texture->id);
+    texture_bind(texture, 1);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
 
+    // 6. Upload bitmap to Texture
     glTexImage2D(
         GL_TEXTURE_2D, 
         0,
@@ -98,21 +134,22 @@ Font* font_load(const char* ttf_path, float font_size) {
 
         // Convert unscaled design units to pixels
         float scale = stbtt_ScaleForPixelHeight(&info, font_size);
-        font->ascent = ascent * scale;
-        font->descent = descent * scale;
-        font->line_gap = line_gap * scale;
-    }
-    else {
-        // Fallback if init fails
-        font->ascent = font_size;
-        font->descent = 0;
-        font->line_gap = 0;
+        font.ascent = ascent * scale;
+        font.descent = descent * scale;
+        font.line_gap = line_gap * scale;
     }
     
     // 8. Clean up and return
     free(ttf_buffer);
     free(temp_bitmap);
-    return font;
+    
+    // Create or reuse a font slot and copy the data into it
+    FontHandle handle = Font_alloc();
+    Font* fontptr = Font_get(handle);
+    font.generation = fontptr->generation; // Copy slot's old generation
+    memcpy(fontptr, &font, sizeof(Font));
+    
+    return handle;
 }
 
 /*
@@ -130,71 +167,69 @@ typedef struct {
     uint32_t glyph_count;
 } FontHeader;
 
-Font* font_load_bin(const char* path) {
-    // 1. Read the .bin file info memory
+FontHandle font_load_bin(const char* path) {
+    ENGINE_ASSERT(path != NULL, "font_load_bin called with NULL path");
+
+    // 1. Read the TTF file info memory
     FILE* f = fopen(path, "rb");
-    if (!f) {
-        fprintf(stderr, "Error: Failed to open font .bin file: %s\n", path);
-        return NULL;
+    if (UNLIKELY(!f)) {
+        LOG_ERROR("Failed to open font .bin file: '%s'", path);
+        return FontHandle_null();
     }
     
     FontHeader header;
-    if (fread(&header, sizeof(FontHeader), 1, f) != 1) {
+    if (UNLIKELY(fread(&header, sizeof(FontHeader), 1, f) != 1)) {
+        LOG_ERROR("Failed to read header from font .bin file: '%s'", path);
         fclose(f);
-        return NULL;
+        return FontHandle_null();
     }
     
     // 3. Magic number validation
-    if (strncmp(header.magic, "FONT", 4) != 0) {
-        fprintf(stderr, "Error: Invalid font format in: %s\n", path);
+    if (UNLIKELY(strncmp(header.magic, "FONT", 4) != 0)) {
+        LOG_ERROR("Invalid magic number in font .bin header: '%s'", path);
         fclose(f);
-        return NULL;
+        return FontHandle_null();
     }
     
-    // 4. Allocate a new font and texture for the atlas
-    Font* font = calloc(1, sizeof(Font));
-    font->texture = calloc(1, sizeof(Texture));
-    
-    font->type = FONT_TYPE_MSDF;
-    font->px_range = header.px_range;
-    font->atlas_w = (float)header.w;
-    font->atlas_h = (float)header.h;
-    font->texture->width = header.w;
-    font->texture->height = header.h;
-    
-    font->pixel_height = header.line_height;
-    font->ascent = header.ascent;
-    font->descent = header.descent;
-    font->gen_size = header.size;
+    // 4. Made new font
+    // If nothing fails, this will be copied into a new font slot
+    Font font = {
+        .active = true,
+        .type = FONT_TYPE_MSDF,
+        .px_range = header.px_range,
+        .atlas_w = (float)header.w,
+        .atlas_h = (float)header.h,
+        .pixel_height = header.line_height,
+        .ascent = header.ascent,
+        .descent = header.descent,
+        .gen_size = header.size
+    };
 
     // 5. Read Glyph Table (96 entries)
-    size_t glyphs_read = fread(font->data.msdf, sizeof(Glyph), header.glyph_count, f);
-    if (glyphs_read != header.glyph_count) {
-        fprintf(stderr, "Error: Incomplete glyph table in %s\n", path);
-        free(font->texture);
-        free(font);
+    size_t glyphs_read = fread(&font.data.msdf, sizeof(Glyph), header.glyph_count, f);
+    if (UNLIKELY(glyphs_read != header.glyph_count)) {
+        LOG_ERROR("Incomplete glyph table in: '%s'", path);
         fclose(f);
-        return NULL;
+        return FontHandle_null();
     }
 
     // 6. Read pixels
     size_t img_size = header.w * header.h * 3; // RGB
     unsigned char* pixels = (unsigned char*)malloc(img_size);
-    if (fread(pixels, 1, img_size, f) != img_size) {
+    if (UNLIKELY(fread(pixels, 1, img_size, f) != img_size)) {
         fprintf(stderr, "Error: Truncated texture data in %s\n", path);
         free(pixels);
-        free(font->texture);
-        free(font);
         fclose(f);
-        return NULL;
+        return FontHandle_null();
     }
 
     fclose(f);
     
-    // 5. Upload to GPU
-    glGenTextures(1, &font->texture->id);
-    glBindTexture(GL_TEXTURE_2D, font->texture->id);
-
+    TextureHandle texture = texture_new(header.w, header.h, GL_RGB8);
+    font.texture = texture;
+    texture_bind(texture, 1);
+    
+    // 5. Upload to Texture
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glTexImage2D(
         GL_TEXTURE_2D, 
@@ -214,33 +249,47 @@ Font* font_load_bin(const char* path) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
     free(pixels);
-    return font;
+    
+    // Create or reuse a font slot and copy the data into it
+    FontHandle handle = Font_alloc();
+    Font* fontptr = Font_get(handle);
+    font.generation = fontptr->generation; // Copy slot's old generation
+    memcpy(fontptr, &font, sizeof(Font));
+    
+    return handle;
 }
 
-void font_destroy(Font* font) {
-    if (!font) return;
-    free(font->texture);
-    free(font);
+void fonts_free(void) {
+    Font_pool_shutdown(NULL);
 }
 
-typedef struct {
-    vec2 pos;
-    vec2 uv;
-    vec4 color;
-} Vertex;
+void font_delete(FontHandle handle) {
+    Font* font = Font_get(handle);
+    // index 0 is the fallback, which shouldn't be deleted
+    if (font == &_Font_pool.items->data[0] || !font->active) return;
+    
+    // Delete the texture associated with the font
+    texture_delete(font->texture);
+    
+    Font_free(handle);
+}
+
 // Converts String -> MeshData
-MeshData font_generate_mesh_data(Font* font, const char* text, TextParams params){
+MeshData font_generate_mesh_data(FontHandle handle, const char* text, TextParams params){
     int len = strlen(text);
     if (len == 0) return (MeshData){0};
+
+    Font* font = Font_get(handle);
 
     // 1. Set up MeshData
     MeshData md;
     md.vertex_count = len * 4;
     md.index_count = len * 6;
-    md.vertices = malloc(md.vertex_count * sizeof(Vertex));
+    md.vertices = malloc(md.vertex_count * sizeof(UIVertex));
     md.indices = malloc(md.index_count * sizeof(uint32_t));
+    ENGINE_ASSERT(md.vertices && md.indices, "Out of memory allocating Font Mesh");
 
-    Vertex* verts = (Vertex*)md.vertices;
+    UIVertex* verts = (UIVertex*)md.vertices;
     
     // Cursor position
     float x = 0.0f;
@@ -249,6 +298,9 @@ MeshData font_generate_mesh_data(Font* font, const char* text, TextParams params
     // Pre-calculate inverse size for UV normalization
     float inv_w = 1.0f / font->atlas_w;
     float inv_h = 1.0f / font->atlas_h;
+    
+    // Covert 4-byte color array into single 32-bit int for fast copying
+    uint32_t color_packed = *((uint32_t*)params.color);
 
     int q_idx = 0; // Valid quad counter
     for (int i = 0; i < len; i++) {
@@ -284,7 +336,6 @@ MeshData font_generate_mesh_data(Font* font, const char* text, TextParams params
         }
         else {
             stbtt_aligned_quad q;
-
             stbtt_GetBakedQuad(font->data.bitmap, font->atlas_w, font->atlas_h, glyph_idx, &x, &y, &q, 1);
             
             // Scale needs to be calculated so it can to relative to the base bitmap atlas
@@ -304,26 +355,22 @@ MeshData font_generate_mesh_data(Font* font, const char* text, TextParams params
         
         int v_start = q_idx * 4;
 
-        // Vert 0: Bottom-Left (x0, y1)
-        glm_vec2_copy((vec2){x0, y1}, verts[v_start + 0].pos);
-        glm_vec2_copy((vec2){u0, v1}, verts[v_start + 0].uv);
+        verts[v_start + 0].pos[0] = x0; verts[v_start + 0].pos[1] = y1;
+        verts[v_start + 0].uv[0]  = u0; verts[v_start + 0].uv[1]  = v1;
+        
+        verts[v_start + 1].pos[0] = x1; verts[v_start + 1].pos[1] = y1;
+        verts[v_start + 1].uv[0]  = u1; verts[v_start + 1].uv[1]  = v1;
+        
+        verts[v_start + 2].pos[0] = x1; verts[v_start + 2].pos[1] = y0;
+        verts[v_start + 2].uv[0]  = u1; verts[v_start + 2].uv[1]  = v0;
+        
+        verts[v_start + 3].pos[0] = x0; verts[v_start + 3].pos[1] = y0;
+        verts[v_start + 3].uv[0]  = u0; verts[v_start + 3].uv[1]  = v0;
 
-        // Vert 1: Bottom-Right (x1, y1)
-        glm_vec2_copy((vec2){x1, y1}, verts[v_start + 1].pos);
-        glm_vec2_copy((vec2){u1, v1}, verts[v_start + 1].uv);
-
-        // Vert 2: Top-Right (x1, y0)
-        glm_vec2_copy((vec2){x1, y0}, verts[v_start + 2].pos);
-        glm_vec2_copy((vec2){u1, v0}, verts[v_start + 2].uv);
-
-        // Vert 3: Top-Left (x0, y0)
-        glm_vec2_copy((vec2){x0, y0}, verts[v_start + 3].pos);
-        glm_vec2_copy((vec2){u0, v0}, verts[v_start + 3].uv);
-
-        // Apply color to all 4 vertices
-        for (int k = 0; k < 4; k++) {
-            glm_vec4_copy(params.color, verts[v_start + k].color);
-        }
+        *((uint32_t*)verts[v_start + 0].color) = color_packed;
+        *((uint32_t*)verts[v_start + 1].color) = color_packed;
+        *((uint32_t*)verts[v_start + 2].color) = color_packed;
+        *((uint32_t*)verts[v_start + 3].color) = color_packed;
 
         // --- Fill indices ---
         int i_start = q_idx * 6;
@@ -340,10 +387,14 @@ MeshData font_generate_mesh_data(Font* font, const char* text, TextParams params
     // Update the final counts
     //   If a char was skipped because it was unsupported, the counts will be wrong
     //   So the counts need to be updated based on the actual working quads generated
-    md.vertex_count = len * 4;
-    md.index_count = len * 6;
-    md.vertices = realloc(md.vertices, md.vertex_count * sizeof(Vertex));
-    md.indices = realloc(md.indices, md.index_count * sizeof(uint32_t));
+    md.vertex_count = q_idx * 4;
+    md.index_count = q_idx * 6;
+
+    // Only realloc if characters were skipped
+    if (q_idx < len) {
+        md.vertices = realloc(md.vertices, md.vertex_count * sizeof(UIVertex));
+        md.indices = realloc(md.indices, md.index_count * sizeof(uint32_t));
+    }
 
     return md;
 }

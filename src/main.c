@@ -1,6 +1,5 @@
 #include "SDL_events.h"
 #include "SDL_keycode.h"
-#include "SDL_platform.h"
 #include "SDL_timer.h"
 #include "SDL_video.h"
 #include "renderer/font.h"
@@ -14,10 +13,9 @@
 #include <cglm/mat4.h>
 #include <stdio.h>
 #include <stdbool.h>
-#include <stdlib.h>
 
 // Here until the renderer is built
-#include "shader_internal.h"
+#include "renderer/vertex.h"
 
 bool init();
 void cleanup();
@@ -78,9 +76,12 @@ int main(void) {
         return 1;
     }
     
+    shaders_init();
+    textures_init();
+    fonts_init();
+    
     // -------- SHADERS --------
 
-    shaders_init();
 
     ShaderHandle shader = shader_create(
                   "/home/user/Documents/sdlmenu/shaders/basicvert.glsl",
@@ -100,26 +101,20 @@ int main(void) {
     ShaderHandle textshader = shader_create(
                   "/home/user/Documents/sdlmenu/shaders/text-v.glsl",
                   "/home/user/Documents/sdlmenu/shaders/msdf-f.glsl"
-                  //"/home/user/Documents/sdlmenu/shaders/textfrag.glsl"
-    );
-
-    
+                  //"/home/user/Documents/sdlmenu/shaders/bitmap-f.glsl"
+    ); 
     
     // ----------- FONT BATCH -----------
-    //Font* rodin_bold = font_load("assets/Rodin-Bold.ttf", 64.0f);
-    Font* rodin_bold = font_load_bin("assets/Rodin-Bold.bin");
+    //FontHandle rodin_bold = font_load("assets/Rodin-Bold.ttf", 64.0f);
+    FontHandle rodin_bold = font_load_bin("assets/Rodin-Bold.bin");
     TextParams params = {
-        .color = {1.0f,1.0f,1.0f,1.0f}, 
+        .color = {255,255,255,255}, 
         .size = 64.0f,
         .softness = 0.03f
     };
-    MeshData txt = font_generate_mesh_data(rodin_bold, "AV Wa", params);
-    
-    VertexLayout flayout = {0};
-    vertex_layout_add(&flayout, 0, 2, GL_FLOAT, false);
-    vertex_layout_add(&flayout, 1, 2, GL_FLOAT, false);
-    vertex_layout_add(&flayout, 2, 4, GL_FLOAT, false);
-    MeshObj* txtobj = mesh_obj_create(0, 0, flayout, true);
+    VertexLayout uivlay = uiv_layout();
+    MeshData txt = font_generate_mesh_data(rodin_bold, "AV Wa", params); 
+    MeshObj* txtobj = mesh_obj_create(uivlay, false);
     MeshHandle txthand = mesh_obj_push(txtobj, txt);
     
     mat4 txtmod; glm_mat4_identity(txtmod);
@@ -128,31 +123,27 @@ int main(void) {
     uniform_store_add(&txtobj->uniforms, "u_model", UNI_MAT4, (void*)txtmod);
     int texdid = 1;
     uniform_store_add(&txtobj->uniforms, "u_tex", UNI_INT, &texdid);
-    uniform_store_add(&txtobj->uniforms, "u_pxrange", UNI_FLOAT, &rodin_bold->px_range);
+    float px_range = 4.0f;
+    uniform_store_add(&txtobj->uniforms, "u_pxrange", UNI_FLOAT, &px_range);
     uniform_store_add(&txtobj->uniforms, "u_softness", UNI_FLOAT, &params.softness);
     
-    Mesh txtmesh = mesh_build(txtobj, textshader); 
+    Mesh txtmesh = mesh_build(txtobj, textshader);
 
     // ------------ IDK SHIT --------------------
-    
-    VertexLayout layout = {0};
-    vertex_layout_add(&layout, 0, 3, GL_FLOAT, false);
-    vertex_layout_add(&layout, 1, 2, GL_FLOAT, false);
-    vertex_layout_add(&layout, 2, 4, GL_UNSIGNED_BYTE, true);
 
-    MeshObj* obj = mesh_obj_create(0, 0, layout, true);
+    MeshObj* obj = mesh_obj_create(uivlay, true);
     
     mat4 mod; glm_mat4_identity(mod);
     uniform_store_add(&obj->uniforms, "u_model", UNI_MAT4, (void*)mod);
     int texid = 1;
     uniform_store_add(&obj->uniforms, "u_tex", UNI_INT, &texid);
 
-    MeshData mdat = gen_quad();
+    MeshData mdat = uiv_gen_quad();
     //mesh_obj_push(obj, mdat);
     MeshHandle hand = mesh_obj_push(obj, mdat);
     printf("Handle: %d\n", (int)hand);
 
-    Texture* tex = texture_load_etc2_bin("assets/icons.bin");
+    TextureHandle tex = texture_load_etc2_bin("assets/icons.bin");
     TextureAtlas* atlas = atlas_create(tex, 16);
     atlas_define_region(atlas, 116, 99, 215, 248, "power");
     TextureRegion* region = atlas_get_region(atlas, "power");
@@ -166,16 +157,19 @@ int main(void) {
     vec3 size2 = { 200.0f, 200.0f, 1.0f };
     glm_scale(mod2, size2);
     MeshData dat2 = mesh_obj_get_data(obj, hand);
-    md_apply_mat4(&dat2, obj->layout, mod2); 
-    md_apply_region(&dat2, region);
+    uiv_apply_mat4(&dat2, obj->layout, mod2); 
+    uiv_apply_region(&dat2, region);
 
     Mesh quad = mesh_build(obj, iconshader);
 
     //mesh_obj_destroy(obj); 
     
     // -------- FRAME BUFFER SETUP -----------
-
-    MeshObj* fboobj = mesh_obj_create_quad();
+    
+    VertexLayout fbvlay = fbv_layout();
+    MeshData fbodat = fbv_gen_quad();
+    MeshObj* fboobj = mesh_obj_create(fbvlay, false);
+    mesh_obj_push(fboobj, fbodat);
     Mesh fboquad = mesh_build(fboobj, fbshader);
     // Framebuffer Object
     unsigned int fbo, fbotex;
@@ -276,7 +270,8 @@ int main(void) {
         shader_use(textshader);
         s = Shader_get(textshader);
         mesh_bind(&txtmesh);
-        texture_bind(rodin_bold->texture, 1);
+        Font* funt = Font_get(rodin_bold);
+        texture_bind(funt->texture, 1);
         uniform_store_apply(&txtmesh.uniforms, s);
         set_uniform_mat4(s, "u_projection", projection);
         glDrawElements(GL_TRIANGLES, txtmesh.index_count, GL_UNSIGNED_INT, 0);
@@ -284,9 +279,9 @@ int main(void) {
         SDL_GL_SwapWindow(gwindow);
     }
     
-    shader_delete(shader);
-    shader_delete(fbshader);
-    shader_delete(iconshader);
+    shaders_free();
+    textures_free();
+    fonts_free();
     cleanup();
 
     return 0;

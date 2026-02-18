@@ -3,6 +3,7 @@
 
 #include "renderer/shader.h"
 #include "renderer/texture.h"
+#include "renderer/vertex.h"
 #include <GLES3/gl3.h>
 #include <cglm/cglm.h>
 #include <cglm/types.h>
@@ -42,46 +43,10 @@ void uniform_store_add(UniformStore* store, const char* name, UniformType type, 
 void uniform_store_apply(UniformStore* store, Shader* shader);
 
 
-/* ---------- VERTEX ATTRIBUTES ---------- */
-
-
-#define MAX_VERTEX_ATTRIBS 8
-
-// Defines a single vertex attribute
-typedef struct {
-    uint32_t index;
-    int32_t size;
-    uint32_t type;
-    unsigned char normalized; // GL_TRUE || GL_FALSE
-    size_t offset;
-} VertexAttribute;
-
-// Defines the vertex attribute layout for an entire mesh
-typedef struct {
-    VertexAttribute attributes[MAX_VERTEX_ATTRIBS]; // Fixed size of 8 attributes
-    uint32_t count;
-    uint32_t stride;
-} VertexLayout;
-
-void vertex_layout_add(VertexLayout* layout, uint32_t index, int32_t size, uint32_t type, bool normalized);
-
-
 /* ---------- MESH ---------- */
 
-// Stores mesh data that will get pushed to a MeshObj
-// OR 
-// Stores pointers to data fetched by handle from a MeshObj
-typedef struct {
-    void* vertices;
-    uint32_t* indices;
-    uint32_t vertex_count;
-    uint32_t index_count;
-} MeshData;
-
-MeshData gen_quad();
-void md_apply_region(MeshData* data, TextureRegion* region);
-void md_apply_mat4(MeshData* data, VertexLayout layout, mat4 matrix);
-
+// TODO: Implement a system to be able to check which MeshObj a MeshHandle corresponds to
+// Also implement handle generations
 typedef int32_t MeshHandle; // Unique Mesh Registry Entry ID
 
 typedef struct {
@@ -103,6 +68,8 @@ typedef struct {
 
 // A CPU-side Mesh. This contains all the information required to build a Mesh.
 // Has batching capabilities while storing data in contiguous arrays to prevent cache misses.
+// TODO: Migrate the vertex and index buffers to using flex arrays
+// Might have to use uint8_t instead of void* for pointer arithmetic
 typedef struct {
     // Data buffers
     void* vertices;
@@ -128,12 +95,16 @@ typedef struct {
     uint32_t usage; // GL_STATIC_DRAW || GL_DYNAMIC_DRAW
 } MeshObj;
 
-MeshObj* mesh_obj_create(uint32_t v_count, uint32_t i_count, VertexLayout layout, bool dynamic);
+MeshObj* mesh_obj_create(VertexLayout layout, bool dynamic);
 MeshHandle mesh_obj_push(MeshObj* obj, MeshData data);
 MeshData mesh_obj_get_data(MeshObj* obj, MeshHandle handle);
 void mesh_obj_transform(MeshObj* obj, MeshHandle handle, mat4 matrix);
-MeshObj* mesh_obj_create_quad();
 void mesh_obj_destroy(MeshObj* obj);
+
+typedef struct {
+    ShaderHandle shader;
+    Texture* texture;
+} Material;
 
 // A GPU-side Mesh. The previous MeshObj data is now stored on
 //  the GPU, and this struct contains the bindings to that data.

@@ -1,7 +1,6 @@
 #include "renderer/mesh.h"
 #include "renderer/shader.h"
 #include "renderer/texture.h"
-#include "shader_internal.h"
 #include <GLES3/gl3.h>
 #include <cglm/io.h>
 #include <cglm/mat4.h>
@@ -19,15 +18,17 @@
  * initial_capacity defines how many UniformEntries can fit in the store's entries
  *  before the UniformStore entries needs to be reallocated.
 */
-void uniform_store_init(UniformStore* store, uint32_t initial_capacity) {
+static bool uniform_store_init(UniformStore* store, uint32_t initial_capacity) {
     store->count = 0;
     store->capacity = initial_capacity;
     store->data_size = 0;
     store->entries = calloc(1, sizeof(UniformEntry) * initial_capacity);
     if (!store->entries) {
         printf("Failed to allocate memory for UniformStore initialization.\n");
+        return false;
     }
     store->data = NULL; // Allocated on first uniform add
+    return true;
 }
 
 /*
@@ -129,157 +130,7 @@ void* uniform_store_get(UniformStore* store, const char* name) {
     return NULL;
 }
 
-
-/* ---------- VERTEX ATTRIBUTES ---------- */
-
-/*
- * Adds a VertexAttribute to the VertexLayout
- *
- * Will skip if you try to add more vertex attributes than `MAX_VERTEX_ATTRIBS`
- * Keeps track of stride for attribute offsets
- *
- * If the `type` isn't recognized, the type size will default to 4
-*/
-void vertex_layout_add(VertexLayout* layout, uint32_t index, int32_t size, uint32_t type, bool normalized) {
-    if (layout->count >= MAX_VERTEX_ATTRIBS) {
-        printf("Trying to add too many vertex attributes. The max is 8\n");
-        return;
-    }
-
-    VertexAttribute* attr = &layout->attributes[layout->count];
-    attr->index = index;
-    attr->size = size;
-    attr->type = type;
-    attr->normalized = normalized ? GL_TRUE : GL_FALSE;
-    attr->offset = layout->stride;
-
-    // Increment stride
-    uint32_t type_size = 0;
-    switch (type) {
-        case GL_FLOAT:         type_size = sizeof(float); break;
-        case GL_UNSIGNED_BYTE: type_size = sizeof(uint8_t); break;
-        case GL_SHORT:         type_size = sizeof(int16_t); break;
-        case GL_INT:           type_size = sizeof(int32_t); break;
-        default:
-            printf("Couldn't find vertex attrib type, defaulting.\n");
-            type_size = 4; break;
-    }
-
-    layout->stride += (size * type_size);
-    layout->count++;
-}
-
-/*
- * Takes a VertexLayout and enables all of it's stored the vertex attributes
-*/
-void vertex_layout_apply(VertexLayout* layout) {
-    for (uint32_t i = 0; i < layout->count; i++) {
-        VertexAttribute* attr = &layout->attributes[i];
-
-        glEnableVertexAttribArray(attr->index);
-        glVertexAttribPointer(
-            attr->index,
-            attr->size,
-            attr->type,
-            attr->normalized,
-            layout->stride,
-            (void*)attr->offset
-        );
-    }
-}
-
-
 /* ---------- MESHOBJ ---------- */
-
-// TODO: Move all of the vertex specific shit out of this file
-// 
-// The vertex should also be renamed to UIVertex
-// This vertex and funcs (gen_quad, md_apply_*) will be UI specific
-
-/*
- * Per-vertex data for creating a Quad
-*/
-typedef struct {
-    float pos[3];
-    float uv[2];
-    uint8_t color[4];
-} Vertex;
-/* 
- * Any MeshData object function is Vertex-specific
- * If a custom vertex is used, custom MeshData functions need to be made
-*/
-
-
-/*
- * Generates a MeshData and allocates it's buffers
- * Fills it's buffers with the data to build a unit-quad
- * Vertices and indices
- * Uses the default Vertex, defined above
-*/
-MeshData gen_quad() {
-    MeshData data;
-
-    data.vertex_count = 4;
-    data.index_count = 6;
-    
-    data.vertices = calloc(data.vertex_count, sizeof(Vertex));
-    data.indices = calloc(data.index_count, sizeof(uint32_t));
-    
-    Vertex* v = (Vertex*)data.vertices;
-
-    v[0] = (Vertex){{-1.0f, -1.0f, 0.0f}, {0.0f, 0.0f}, {255, 255, 255, 255}};
-    v[1] = (Vertex){{ 1.0f, -1.0f, 0.0f}, {1.0f, 0.0f}, {255, 255, 255, 255}};
-    v[2] = (Vertex){{ 1.0f,  1.0f, 0.0f}, {1.0f, 1.0f}, {255, 255, 255, 255}};
-    v[3] = (Vertex){{-1.0f,  1.0f, 0.0f}, {0.0f, 1.0f}, {255, 255, 255, 255}};
-    
-    uint32_t indices[] = { 0, 1, 2, 2, 3, 0 };
-    memcpy(data.indices, indices, sizeof(indices));
-
-    return data;
-}
-
-/*
- * Applies a texture region's uv to a MeshData (quad)
- * This will only work on MeshData objects using the default Vertex format
- * Specifically, this will only work with quads
- *
- * Useful for creating icons from a texture atlas
-*/
-void md_apply_region(MeshData* data, TextureRegion* region) {
-    if (data->vertex_count != 4) return; // 4 vertices for a quad are required
-
-    Vertex* v = (Vertex*)data->vertices;
-
-    // v[0] - Bottom-Left
-    v[0].uv[0] = region->uv_min[0]; 
-    v[0].uv[1] = region->uv_min[1];
-
-    // v[1] - Bottom-Right
-    v[1].uv[0] = region->uv_max[0]; 
-    v[1].uv[1] = region->uv_min[1];
-
-    // v[2] - Top-Right
-    v[2].uv[0] = region->uv_max[0]; 
-    v[2].uv[1] = region->uv_max[1];
-
-    // v[3] - Top-Left
-    v[3].uv[0] = region->uv_min[0]; 
-    v[3].uv[1] = region->uv_max[1];
-}
-
-void md_apply_mat4(MeshData* data, VertexLayout layout, mat4 matrix) {
-    uint8_t* ptr = (uint8_t*)data->vertices;
-
-    for (uint32_t i = 0; i < data->vertex_count; i++) {
-        // This assumes that the vertex this is being run on
-        //  has 3 floats at the start that define the vertex positions
-        float* pos = (float*)ptr;
-
-        glm_mat4_mulv3(matrix, pos, 1.0f, pos);
-        
-        ptr += layout.stride;
-    }
-}
 
 /*
  * Takes a data range:
@@ -314,11 +165,16 @@ void dirty_reset(DirtyRange* dirty) {
 }
 
 /*
+
  * Applies matrix transformations to an object in a MeshObj
  * Identifies the object by MeshHandle, retrieves the data via mesh_obj_get_data,
  *  then runs md_apply_mat4 to the resulting MeshData.
  * Marks the updated data as dirty to be reuploaded to the GPU
-*/
+// TODO:
+// This probably needs to be changed to a mark_handle_dirty function or something similar
+// The transformations will be done on the MeshData, and then this function can be called
+// on the handle to mark that MeshData as dirty
+
 void mesh_obj_transform(MeshObj* obj, MeshHandle handle, mat4 matrix) {
     MeshData view = mesh_obj_get_data(obj, handle);
     if (view.vertices == NULL) return;
@@ -328,6 +184,7 @@ void mesh_obj_transform(MeshObj* obj, MeshHandle handle, mat4 matrix) {
     MeshRegistryEntry* entry = &obj->registry[handle];
     range_mark_dirty(&obj->v_dirty, entry->v_offset, entry->v_count * obj->layout.stride);
 }
+*/
 
 /*
  * Helper for mesh_obj_push
@@ -558,67 +415,26 @@ MeshData mesh_obj_get_data(MeshObj* obj, MeshHandle handle) {
 /*
  * Creates a heap allocated empty MeshObj
  *
- * VertexLayout needs to.v be defined and passed to the MeshObj
- * A buffer for vertices and indices are allocated based of v_count and i_count
+ * VertexLayout needs to be defined and passed to the MeshObj
  * An empty UniformStore is allocated
  *
  * Returns `NULL` if any of the allocations fails.
  * Returns the pointer to the created MeshObj on success.
 */
-MeshObj* mesh_obj_create(uint32_t v_count, uint32_t i_count, VertexLayout layout, bool dynamic) {
+MeshObj* mesh_obj_create(VertexLayout layout, bool dynamic) {
     MeshObj* obj = calloc(1, sizeof(MeshObj));
     if (!obj) return NULL;
 
-    obj->vertex_count = v_count;
-    obj->index_count = i_count;
     obj->layout = layout;
     obj->usage = dynamic ? GL_DYNAMIC_DRAW : GL_STATIC_DRAW;
 
     // Start with a capacity of 4
-    uniform_store_init(&obj->uniforms, 4);
-    
-    obj->vertices = calloc(v_count, layout.stride);
-    obj->indices = calloc(i_count, sizeof(uint32_t));
-
-    if (!obj->vertices || !obj->indices || !obj->uniforms.entries) {
-        printf("MeshObj memory allocation failed.\n");
-        mesh_obj_destroy(obj);
+    bool success = uniform_store_init(&obj->uniforms, 4);
+    if (!success) {
+        free(obj);
         return NULL;
     }
     
-    return obj;
-}
-
-/*
- * Creates a default complete quad MeshObj
- *
- * Sets up VertexLayout based off the default Vertex struct
- * Creates a UniformStore with a mat4 model matrix uniform
- * Defines all the vertices and indices
-*/
-MeshObj* mesh_obj_create_quad() {
-    // Build vertex layout
-    VertexLayout layout = {0};
-    vertex_layout_add(&layout, 0, 3, GL_FLOAT, false);
-    vertex_layout_add(&layout, 1, 2, GL_FLOAT, false);
-    vertex_layout_add(&layout, 2, 4, GL_UNSIGNED_BYTE, true);
-
-    MeshObj* obj = mesh_obj_create(4, 6, layout, false);
-    
-    mat4 model; glm_mat4_identity(model);
-    uniform_store_add(&obj->uniforms, "u_model", UNI_MAT4, (void*)model);
-    
-    // Cast void* to Vertex*. Pointer to the start of memory section
-    Vertex* v = (Vertex*)obj->vertices;
-
-    v[0] = (Vertex){{-1.0f, -1.0f, 0.0f}, {0.0f, 0.0f}, {255, 255, 255, 255}};
-    v[1] = (Vertex){{ 1.0f, -1.0f, 0.0f}, {1.0f, 0.0f}, {255, 255, 255, 255}};
-    v[2] = (Vertex){{ 1.0f,  1.0f, 0.0f}, {1.0f, 1.0f}, {255, 255, 255, 255}};
-    v[3] = (Vertex){{-1.0f,  1.0f, 0.0f}, {0.0f, 1.0f}, {255, 255, 255, 255}};
-
-    uint32_t indices[] = { 0, 1, 2, 2, 3, 0 };
-    memcpy(obj->indices, indices, sizeof(indices));
-
     return obj;
 }
 

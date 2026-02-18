@@ -1,6 +1,7 @@
 #ifndef TEXTURE_H
 #define TEXTURE_H
 
+#include "utils/handles.h"
 #include <cglm/types.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -11,28 +12,38 @@ typedef struct {
     uint32_t id; // OpenGL binding texture id
     int width;
     int height;
-    int channels;
+    uint32_t format;
 
     //int layer_count; // For texture arrays if needed later
     char path[MAX_TEXTURE_PATH]; // Debugging
+
+    bool active;
+    uint32_t generation;
 } Texture;
 
-/*
- * Defines the struct which is used to parse the .bin format header
-*/
-typedef struct {
-    uint32_t magic;
-    uint32_t width;
-    uint32_t height;
-    uint32_t internal_format;
-    uint32_t data_size;
-} BakedHeader;
+DECLARE_HANDLE(TextureHandle);
 
-Texture* texture_load(const char* filepath, bool premultiply_alpha);
-Texture* texture_load_etc2_bin(const char* filepath);
+// --- RESOURCE POOL ---
+// Declared for the resource getter (static inline)
+DEFINE_FLEX_ARRAY(Texture, TextureArray)
+DECLARE_RESOURCE_POOL(Texture, TextureArray)
+DEFINE_RESOURCE_GETTER(Texture, TextureHandle, _Texture_pool, "TEXTURE")
 
-void texture_bind(Texture* texture, uint32_t slot);
-void texture_free(Texture* texture);
+// --- PUBLIC API ---
+
+void textures_init(void);
+void textures_free(void);
+
+TextureHandle texture_new(int w, int h, uint32_t format);
+TextureHandle texture_load(const char* filepath, bool premultiply_alpha);
+TextureHandle texture_load_etc2_bin(const char* filepath);
+
+void texture_bind(TextureHandle handle, uint32_t slot);
+void texture_delete(TextureHandle handle);
+
+
+/* ----- TEXTURE ATLAS ----- */
+
 
 #define MAX_REGION_NAME 64
 
@@ -51,7 +62,7 @@ typedef struct {
 } AtlasSlot;
 
 typedef struct {
-    Texture* parent_texture;
+    TextureHandle parent_texture;
     AtlasSlot* slots;
     uint32_t capacity;
     uint32_t count;
@@ -59,7 +70,7 @@ typedef struct {
     int height;
 } TextureAtlas;
 
-TextureAtlas* atlas_create(Texture* texture, uint32_t initial_capacity);
+TextureAtlas* atlas_create(TextureHandle texture, uint32_t initial_capacity);
 void atlas_define_region(TextureAtlas* atlas, int x, int y, int w, int h, const char* name);
 TextureRegion* atlas_get_region(TextureAtlas* atlas, const char* name);
 void atlas_free(TextureAtlas* atlas);
