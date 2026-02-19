@@ -4,6 +4,8 @@
 #include "renderer/shader.h"
 #include "renderer/texture.h"
 #include "renderer/vertex.h"
+#include "utils/flex_array.h"
+#include "utils/handles.h"
 #include <GLES3/gl3.h>
 #include <cglm/cglm.h>
 #include <cglm/types.h>
@@ -11,8 +13,7 @@
 #include <stdint.h>
 
 
-/* ---------- UNIFORMS ---------- */
-
+/* -------- UNIFORMS -------- */
 
 typedef enum {
     UNI_FLOAT,
@@ -39,15 +40,36 @@ typedef struct {
     uint32_t data_size;
 } UniformStore;
 
+void uniform_store_init(UniformStore* store, uint32_t initial_capacity);
+void uniform_store_free(UniformStore* store);
 void uniform_store_add(UniformStore* store, const char* name, UniformType type, void* value);
 void uniform_store_apply(UniformStore* store, Shader* shader);
+void* uniform_store_get(UniformStore* store, const char* name);
 
+/* -------- MATERIAL -------- */
+
+typedef struct {
+    ShaderHandle shader;
+    TextureHandle texture;
+    UniformStore uniforms;
+
+    bool active;
+    uint32_t generation;
+} Material;
+
+DECLARE_HANDLE(MaterialHandle)
+
+DEFINE_FLEX_ARRAY(Material, MaterialArray)
+DECLARE_RESOURCE_POOL(Material, MaterialArray)
+DEFINE_RESOURCE_GETTER(Material, MaterialHandle, _Material_pool, "MATERIAL")
+
+MaterialHandle material_create(ShaderHandle shader, TextureHandle texture);
+void material_set_uniform(MaterialHandle mat, const char* name, UniformType type, void* value);
+void material_apply(MaterialHandle mat);
 
 /* ---------- MESH ---------- */
 
-// TODO: Implement a system to be able to check which MeshObj a MeshHandle corresponds to
-// Also implement handle generations
-typedef int32_t MeshHandle; // Unique Mesh Registry Entry ID
+typedef int32_t SubMeshID; // Unique Mesh Registry Entry ID
 
 typedef struct {
     // Byte offset in vertex buffer (needs to be byte offset since vertex stride is unknown)
@@ -89,22 +111,18 @@ typedef struct {
     DirtyRange v_dirty, i_dirty;
     
     VertexLayout layout; // Defines the data format/layout of vertices for OpenGL
-    UniformStore uniforms;
-
     // Defines if this MeshObj has dynamic data that needs to be updated frequently
     uint32_t usage; // GL_STATIC_DRAW || GL_DYNAMIC_DRAW
 } MeshObj;
 
 MeshObj* mesh_obj_create(VertexLayout layout, bool dynamic);
-MeshHandle mesh_obj_push(MeshObj* obj, MeshData data);
-MeshData mesh_obj_get_data(MeshObj* obj, MeshHandle handle);
-void mesh_obj_transform(MeshObj* obj, MeshHandle handle, mat4 matrix);
 void mesh_obj_destroy(MeshObj* obj);
 
-typedef struct {
-    ShaderHandle shader;
-    Texture* texture;
-} Material;
+SubMeshID mesh_obj_push(MeshObj* obj, MeshData data);
+MeshData mesh_obj_get_data(MeshObj* obj, SubMeshID handle);
+void mesh_obj_transform(MeshObj* obj, SubMeshID handle, mat4 matrix);
+
+/* -------- MESH RESOURCE -------- */
 
 // A GPU-side Mesh. The previous MeshObj data is now stored on
 //  the GPU, and this struct contains the bindings to that data.
@@ -116,17 +134,28 @@ typedef struct {
     uint32_t vbo_capacity, ebo_capacity;
     
     VertexLayout layout; // Still stored for debugging
-    UniformStore uniforms;
+    MaterialHandle default_material;
     
-    ShaderHandle shader;
-    Texture* texture;
+    bool active;
+    uint32_t generation;
 } Mesh;
 
+DECLARE_HANDLE(MeshHandle)
+
+DEFINE_FLEX_ARRAY(Mesh, MeshArray)
+DECLARE_RESOURCE_POOL(Mesh, MeshArray)
+DEFINE_RESOURCE_GETTER(Mesh, MeshHandle, _Mesh_pool, "MESH")
+
+void meshes_init(void);
+void meshes_free(void);
+
 // Builds a MeshObj into a Mesh
-Mesh mesh_build(MeshObj* obj, ShaderHandle shader);
-void mesh_bind(Mesh* mesh);
-void* mesh_get_uniform(Mesh* mesh, const char* name);
-void mesh_update_gpu(Mesh* mesh, MeshObj* obj);
-void mesh_destroy(Mesh* mesh);
+MeshHandle mesh_create_from_obj(MeshObj* obj);
+
+// Updates an existing Mesh with new data from MeshObj (Uses dirty ranges)
+void mesh_update_from_obj(MeshHandle handle, MeshObj* obj);
+
+void mesh_bind(MeshHandle handle);
+void mesh_delete(MeshHandle handle);
 
 #endif // !MESH_H

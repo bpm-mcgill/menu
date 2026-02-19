@@ -1,6 +1,8 @@
 #include "renderer/mesh.h"
+#include "engine.h"
 #include "renderer/shader.h"
 #include "renderer/texture.h"
+#include "utils/handles.h"
 #include <GLES3/gl3.h>
 #include <cglm/io.h>
 #include <cglm/mat4.h>
@@ -9,6 +11,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* ---------- RESOURCE POOLS ---------- */
+
+DEFINE_RESOURCE_POOL(Material, MaterialHandle, MaterialArray);
+DEFINE_RESOURCE_POOL(Mesh, MeshHandle, MeshArray);
 
 /* ---------- UNIFORMS ---------- */
 
@@ -18,17 +24,25 @@
  * initial_capacity defines how many UniformEntries can fit in the store's entries
  *  before the UniformStore entries needs to be reallocated.
 */
-static bool uniform_store_init(UniformStore* store, uint32_t initial_capacity) {
+void uniform_store_init(UniformStore* store, uint32_t initial_capacity) {
     store->count = 0;
     store->capacity = initial_capacity;
     store->data_size = 0;
-    store->entries = calloc(1, sizeof(UniformEntry) * initial_capacity);
-    if (!store->entries) {
-        printf("Failed to allocate memory for UniformStore initialization.\n");
-        return false;
+    store->entries = NULL;
+    store->data = NULL;
+    if (initial_capacity > 0) {
+        store->entries = calloc(initial_capacity, sizeof(UniformEntry));
+        ENGINE_ASSERT(store->entries != NULL, "Failed to allocated UniformStore entries.");
     }
-    store->data = NULL; // Allocated on first uniform add
-    return true;
+}
+
+void uniform_store_free(UniformStore *store) {
+    if (store->entries) free(store->entries);
+    if (store->data) free(store->data);
+    store->entries = NULL;
+    store->data = NULL;
+    store->count = 0;
+    store->capacity = 0;
 }
 
 /*
@@ -45,12 +59,9 @@ static bool uniform_store_init(UniformStore* store, uint32_t initial_capacity) {
 void uniform_store_add(UniformStore* store, const char* name, UniformType type, void* value) {
     // Ensure if another UniformEntry can be stored
     if (store->count >= store->capacity) {
-        store->capacity *= 2;
+        store->capacity = (store->capacity == 0) ? 4 : store->capacity * 2;
         void* temp = realloc(store->entries, sizeof(UniformEntry) * store->capacity);
-        if (!temp) {
-            printf("Error reallocating uniform store to fit new capacity.\n");
-            return;
-        }
+        ENGINE_ASSERT(temp != NULL, "Error reallocating uniform store entries.");
         store->entries = temp;
     }
 
@@ -75,11 +86,9 @@ void uniform_store_add(UniformStore* store, const char* name, UniformType type, 
 
     // Reallocate to fit new data and copy data into new allocation
     void* temp = realloc(store->data, store->data_size + size);
-    if (!temp) {
-        printf("Error reallocating memory uniform store memory sector to fit new uniform data.\n");
-        return;
-    }
+    ENGINE_ASSERT(temp != NULL, "Error reallocating uniform data.");
     store->data = temp;
+
     memcpy(store->data + entry->offset, value, size);
 
     store->data_size += size;
@@ -121,16 +130,54 @@ void uniform_store_apply(UniformStore* store, Shader* shader) {
 void* uniform_store_get(UniformStore* store, const char* name) {
     if (!store || !name) return NULL;
 
-    for (unsigned int i = 0; i < store->count; i++) {
+    for (uint32_t i = 0; i < store->count; i++) {
         if (strcmp(store->entries[i].name, name) == 0) {
             return (void*)(store->data + store->entries[i].offset);
         }
     }
-    printf("Unable to find uniform '%s'\n", name);
+    LOG_WARN("Unable to find uniform '%s'", name);
     return NULL;
 }
 
-/* ---------- MESHOBJ ---------- */
+/* ---------- MATERIAL ---------- */
+
+MaterialHandle material_create(ShaderHandle shader, TextureHandle texture) {
+    MaterialHandle handle = Material_alloc();
+    Material* mat = Material_get(handle);
+
+    mat->shader = shader;
+    mat->texture = texture;
+    uniform_store_init(&mat->uniforms, 4);
+    
+    return handle;
+}
+
+void material_set_uniform(MaterialHandle handle, const char* name, UniformType type, void* value) {
+    Material* mat = Material_get(handle);
+    if (!mat) return;
+    uniform_store_add(&mat->uniforms, name, type, value);
+}
+
+void material_apply(MaterialHandle handle) {
+    Material* mat = Material_get(handle);
+    if (!mat) return;
+
+    // Bind Shader
+    shader_use(mat->shader);
+    Shader* s = Shader_get(mat->shader);
+
+    // Bind Texture
+    texture_bind(mat->texture, 0); // Default to slot 0
+
+    // Apply uniforms
+    uniform_store_apply(&mat->uniforms, s);
+}
+
+static void material_unload_internal(Material* mat) {
+    uniform_store_free(&mat->uniforms);
+}
+
+/* ---------- MESHOBJ ----------- */
 
 /*
  * Takes a data range:
@@ -162,6 +209,32 @@ void dirty_reset(DirtyRange* dirty) {
     dirty->is_dirty = false;
     dirty->min_offset = 0;
     dirty->max_offset = 0;
+}
+
+/*
+ * Creates a heap allocated empty MeshObj
+ * VertexLayout needs to be defined and passed to the MeshObj
+ * Returns the pointer to the created MeshObj on success.
+*/
+MeshObj* mesh_obj_create(VertexLayout layout, bool dynamic) {
+    MeshObj* obj = calloc(1, sizeof(MeshObj));
+    ENGINE_ASSERT(obj != NULL, "Out of memory allocating MeshObj.");
+    obj->layout = layout;
+    obj->usage = dynamic ? GL_DYNAMIC_DRAW : GL_STATIC_DRAW; 
+    return obj;
+}
+
+/*
+ * Frees all of the memory allocated to a MeshObj
+ * Useful once the MeshObj is built into a Mesh, and the MeshObj is no longer required
+*/
+void mesh_obj_destroy(MeshObj *obj) {
+    if (!obj) return;
+    free(obj->vertices);
+    free(obj->indices);
+    free(obj->registry);
+    free(obj->free_list);
+    free(obj);
 }
 
 /*
@@ -200,59 +273,17 @@ void mesh_obj_ensure_capacity(MeshObj* obj, uint32_t add_v, uint32_t add_i) {
     if (obj->vertex_count + add_v > obj->vertex_capacity) {
         obj->vertex_capacity = (obj->vertex_capacity + add_v) * 2;
         void* temp = realloc(obj->vertices, obj->vertex_capacity * obj->layout.stride);
-        if (temp != NULL) {
-            obj->vertices = temp;
-        }
-        else {
-            printf("MeshObj vertices realloc failed. Vertex buffer was not resized.\n");
-        }
+        ENGINE_ASSERT(temp != NULL, "Vertex buffer realloc failed.");
+        obj->vertices = temp;
     }
 
     // Index Buffer
     if (obj->index_count + add_i > obj->index_capacity) {
         obj->index_capacity = (obj->index_capacity + add_i) * 2;
         void* temp = realloc(obj->indices, obj->index_capacity * sizeof(uint32_t));
-        if (temp != NULL) {
-            obj->indices = temp;
-        }
-        else {
-            printf("MeshObj indices realloc failed. Index buffer was not resized.\n");
-        }
+        ENGINE_ASSERT(temp != NULL, "Index buffer realloc failed.");
+        obj->indices = temp;
     }
-}
-
-/*
- * Helper for mesh_obj_push
- *
- * Will return a new (or inactive) MeshHandle to be used for a new object
- *  being added to the MeshObj registry.
- * The free_list is checked first for inactive registry entries, and if one isn't found,
- *  the next free index in the registry is used as the MesHandle.
- * If the registry doesn't have another free index, the registry size is doubled using realloc
- *  and the new data is zeroed out. Then the next free handle is used.
-*/
-MeshHandle mesh_obj_get_free_handle(MeshObj* obj) {
-    if (obj->free_list_count > 0) {
-        // Decrementing size "removes" the last element (doesn't get removed, but the memory is free to be overwritten)
-        return obj->free_list[--obj->free_list_count];
-    }
-
-    if (obj->registry_count >= obj->registry_capacity) {
-        uint32_t new_cap = (obj->registry_capacity == 0) ? 16 : obj->registry_capacity * 2;
-        void* temp = realloc(obj->registry, new_cap * sizeof(MeshRegistryEntry));
-        if (temp == NULL) {
-            printf("Failed to realloc MeshObj registry");
-            //return;
-        }
-        obj->registry = temp;
-
-        // Zero out the new memory
-        memset(obj->registry + obj->registry_capacity, 0, (new_cap - obj->registry_capacity) * sizeof(MeshRegistryEntry));
-
-        obj->registry_capacity = new_cap;
-    }
-
-    return (MeshHandle)(obj->registry_count++);
 }
 
 /*
@@ -264,22 +295,35 @@ MeshHandle mesh_obj_get_free_handle(MeshObj* obj) {
  * copy the vertex and index data from MeshData into MeshObj buffers,
  * and then mark the new data range as dirty to be uploaded to the GPU
 */
-MeshHandle mesh_obj_push(MeshObj* obj, MeshData data) {
+SubMeshID mesh_obj_push(MeshObj* obj, MeshData data) {
     // 1. Realloc vertices and indices to fit new data
     mesh_obj_ensure_capacity(obj, data.vertex_count, data.index_count);
-
+    
     // 2. Get an available registry slot, or append a new one if none are free
-    MeshHandle handle = mesh_obj_get_free_handle(obj);
+    SubMeshID id;
+    if (obj->free_list_count > 0) {
+        return obj->free_list[--obj->free_list_count];
+    }
+    else {
+        if (obj->registry_count >= obj->registry_capacity) {
+            uint32_t new_cap = (obj->registry_capacity == 0) ? 16 : obj->registry_capacity * 2;
+            obj->registry = realloc(obj->registry, new_cap * sizeof(MeshRegistryEntry));
+            memset(obj->registry + obj->registry_capacity, 0, (new_cap - obj->registry_capacity) * sizeof(MeshRegistryEntry));
+            obj->registry_capacity = new_cap;
+        }
+        id = (SubMeshID)obj->registry_count++;
+    }
 
     // 3. Config new registry slot with the proper information
-    obj->registry[handle].v_offset = obj->vertex_count * obj->layout.stride;
-    obj->registry[handle].v_count = data.vertex_count;
-    obj->registry[handle].i_start = obj->index_count;
-    obj->registry[handle].i_count = data.index_count;
-    obj->registry[handle].active = true;
+    MeshRegistryEntry* entry = &obj->registry[id];
+    entry->v_offset = obj->vertex_count * obj->layout.stride;
+    entry->v_count = data.vertex_count;
+    entry->i_start = obj->index_count;
+    entry->i_count = data.index_count;
+    entry->active = true;
     
     // 4. Copy data into the main vertex buffer
-    void* v_dest = (uint8_t*)obj->vertices + obj->registry[handle].v_offset;
+    void* v_dest = (uint8_t*)obj->vertices + entry->v_offset;
     memcpy(v_dest, data.vertices, data.vertex_count * obj->layout.stride);
     
     // 5. Copy data into the main index buffer
@@ -295,14 +339,14 @@ MeshHandle mesh_obj_push(MeshObj* obj, MeshData data) {
     obj->index_count += data.index_count;
 
     // Mark new data as dirty so it will be updated in the GPU
-    range_mark_dirty(&obj->v_dirty, obj->registry[handle].v_offset, data.vertex_count * obj->layout.stride);
+    range_mark_dirty(&obj->v_dirty, entry->v_offset, data.vertex_count * obj->layout.stride);
     range_mark_dirty(
         &obj->i_dirty, 
-        obj->registry[handle].i_start * sizeof(uint32_t),
+        entry->i_start * sizeof(uint32_t),
         data.index_count * sizeof(uint32_t)
     );
 
-    return handle;
+    return id;
 }
 
 /*
@@ -315,10 +359,10 @@ MeshHandle mesh_obj_push(MeshObj* obj, MeshData data) {
  *  into the data are different.
  * Their new offsets are equal to their previous offset - the size of the data that was removed
 */
-void mesh_obj_remove(MeshObj* obj, MeshHandle handle) {
-    if (handle < 0 || !obj->registry[handle].active) return;
+void mesh_obj_remove(MeshObj* obj, SubMeshID id) {
+    if (id < 0 || !obj->registry[id].active) return;
 
-    MeshRegistryEntry* to_remove = &obj->registry[handle];
+    MeshRegistryEntry* to_remove = &obj->registry[id];
 
     uint32_t v_remove_bytes = to_remove->v_count * obj->layout.stride;
     uint32_t i_remove_count = to_remove->i_count;
@@ -371,7 +415,7 @@ void mesh_obj_remove(MeshObj* obj, MeshHandle handle) {
     obj->vertex_count -= to_remove->v_count;
     obj->index_count -= i_remove_count;
     to_remove->active = false;
-    obj->free_list[obj->free_list_count++] = handle;
+    obj->free_list[obj->free_list_count++] = id;
 
     // 5. Mark the data that was changed as dirty
     range_mark_dirty(
@@ -393,13 +437,13 @@ void mesh_obj_remove(MeshObj* obj, MeshHandle handle) {
  *  to the MeshObj buffer pointer.
  * These offset pointer are then stored in a MeshData and the MeshData is returned
 */
-MeshData mesh_obj_get_data(MeshObj* obj, MeshHandle handle) {
-    if (handle < 0 || handle >= (int)obj->registry_count || !obj->registry[handle].active) {
+MeshData mesh_obj_get_data(MeshObj* obj, SubMeshID id) {
+    if (id < 0 || id >= (int)obj->registry_count || !obj->registry[id].active) {
         printf("MeshObj get data call failed. Object not valid\n");
         return (MeshData){.vertices = NULL, .indices = NULL, .vertex_count = 0, .index_count = 0};
     }
 
-    MeshRegistryEntry* entry = &obj->registry[handle];
+    MeshRegistryEntry* entry = &obj->registry[id];
     MeshData view;
 
     // Retrieve pointers to the objects data in the buffers
@@ -412,52 +456,42 @@ MeshData mesh_obj_get_data(MeshObj* obj, MeshHandle handle) {
     return view;
 }
 
+/* ---------- MESH ---------- */
+
 /*
- * Creates a heap allocated empty MeshObj
- *
- * VertexLayout needs to be defined and passed to the MeshObj
- * An empty UniformStore is allocated
- *
- * Returns `NULL` if any of the allocations fails.
- * Returns the pointer to the created MeshObj on success.
+ * Will initialize the Mesh and Material resource pools
 */
-MeshObj* mesh_obj_create(VertexLayout layout, bool dynamic) {
-    MeshObj* obj = calloc(1, sizeof(MeshObj));
-    if (!obj) return NULL;
+void meshes_init(void) {
+    if (_Mesh_pool.items == NULL) {
+        _Mesh_pool.items = MeshArray_create(16);
+        _Mesh_pool.free_list = IndexArray_create(16);
 
-    obj->layout = layout;
-    obj->usage = dynamic ? GL_DYNAMIC_DRAW : GL_STATIC_DRAW;
+        // TODO: Fallback mesh (quad)
+        // Placeholder used for now
+        Mesh fallback = { .active = true, .generation = 0 };
+        _Mesh_pool.items = MeshArray_push(_Mesh_pool.items, fallback);
 
-    // Start with a capacity of 4
-    bool success = uniform_store_init(&obj->uniforms, 4);
-    if (!success) {
-        free(obj);
-        return NULL;
+        LOG_INFO("Mesh Resource: Initialized (Capacity: %u, Pool: %p)",
+                _Mesh_pool.items->capacity, (void*)&_Mesh_pool);
+    }
+    else {
+        LOG_WARN("Attempted to reinitialize mesh resource. Ignoring.");
     }
     
-    return obj;
+    if (_Material_pool.items == NULL) {
+        _Material_pool.items = MaterialArray_create(16);
+        _Material_pool.free_list = IndexArray_create(16);
+        
+        Material fallback = { .active = true, .generation = 0 };
+        _Material_pool.items = MaterialArray_push(_Material_pool.items, fallback);
+
+        LOG_INFO("Material Resource: Initialized (Capacity: %u, Pool: %p)",
+                _Mesh_pool.items->capacity, (void*)&_Mesh_pool);
+    }
+    else {
+        LOG_WARN("Attempted to reinitialize material resource. Ignoring.");
+    }
 }
-
-/*
- * Frees all of the memory allocated to a MeshObj
- * Useful once the MeshObj is built into a Mesh, and the MeshObj is no longer required
-*/
-void mesh_obj_destroy(MeshObj *obj) {
-    if (!obj) return;
-    
-    free(obj->vertices);
-    free(obj->indices);
-    
-    free(obj->uniforms.entries);
-    free(obj->uniforms.data);
-
-    free(obj->registry);
-    free(obj->free_list);
-
-    free(obj);
-}
-
-/* ---------- MESH ---------- */
 
 /*
  * Takes a MeshObj, and uploads the MeshObj data to the GPU
@@ -466,48 +500,45 @@ void mesh_obj_destroy(MeshObj *obj) {
  * Clears the UniformStore of the MeshObj passed in, 
  *  so that a subsequent mesh_obj_destroy doesn't free the live data in the store
 */
-Mesh mesh_build(MeshObj* obj, ShaderHandle shader) {
-    Mesh mesh = {0};
-    mesh.layout = obj->layout;
-    mesh.uniforms = obj->uniforms;
-    mesh.index_count = obj->index_count;
-    mesh.shader = shader;
+MeshHandle mesh_create_from_obj(MeshObj* obj) {
+    MeshHandle handle = Mesh_alloc();
+    Mesh* mesh = Mesh_get(handle);
+
+    mesh->layout = obj->layout;
+    mesh->index_count = obj->index_count;
 
     // 1. Generate handles
-    glGenVertexArrays(1, &mesh.vao);
-    glGenBuffers(1, &mesh.vbo);
-    glGenBuffers(1, &mesh.ebo);
+    glGenVertexArrays(1, &mesh->vao);
+    glGenBuffers(1, &mesh->vbo);
+    glGenBuffers(1, &mesh->ebo);
     
     // 2. Bind VAO to record VBO and EBO state
-    glBindVertexArray(mesh.vao);
+    glBindVertexArray(mesh->vao);
 
     // 3. Upload Vertex Data
-    mesh.vbo_capacity = obj->vertex_count * obj->layout.stride;
-    glBindBuffer(GL_ARRAY_BUFFER, mesh.vbo);
+    mesh->vbo_capacity = obj->vertex_count * obj->layout.stride;
+    glBindBuffer(GL_ARRAY_BUFFER, mesh->vbo);
     glBufferData(GL_ARRAY_BUFFER,
-                 mesh.vbo_capacity,
+                 mesh->vbo_capacity,
                  obj->vertices,
                  obj->usage);
 
     // 4. Upload Index Data
-    mesh.ebo_capacity = obj->index_count * sizeof(uint32_t);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.ebo);
+    mesh->ebo_capacity = obj->index_count * sizeof(uint32_t);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh->ebo);
     glBufferData(GL_ELEMENT_ARRAY_BUFFER,
-                 mesh.ebo_capacity,
+                 mesh->ebo_capacity,
                  obj->indices,
                  obj->usage);
 
     // 5. Set up Vertex Attributes
-    vertex_layout_apply(&mesh.layout);
+    vertex_layout_apply(&mesh->layout);
 
     // 6. Unbind
     glBindVertexArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 
-    // 7. Clear the obj store so mesh_obj_destroy doesn't free the live data
-    memset(&obj->uniforms, 0, sizeof(UniformStore));
-
-    return mesh;
+    return handle;
 }
 
 /*
@@ -518,7 +549,10 @@ Mesh mesh_build(MeshObj* obj, ShaderHandle shader) {
  * - After an upload, the dirty ranges are cleared, as the data is synced
  * - Handles VBO and EBO buffers (vertex and indices)
 */
-void mesh_update_gpu(Mesh* mesh, MeshObj* obj) { 
+void mesh_update_from_obj(MeshHandle handle, MeshObj* obj) { 
+    Mesh* mesh = Mesh_get(handle);
+    if (!mesh) return;
+
     // Update vertex buffer
     if (obj->v_dirty.is_dirty) {
         glBindBuffer(GL_ARRAY_BUFFER, mesh->vbo);
@@ -536,8 +570,6 @@ void mesh_update_gpu(Mesh* mesh, MeshObj* obj) {
             void* data_start = (uint8_t*)obj->vertices + obj->v_dirty.min_offset;
             glBufferSubData(GL_ARRAY_BUFFER, obj->v_dirty.min_offset, update_size, data_start);
         }
-        
-        obj->v_dirty.is_dirty = false;
         dirty_reset(&obj->v_dirty);
     }
     
@@ -558,24 +590,35 @@ void mesh_update_gpu(Mesh* mesh, MeshObj* obj) {
             void* data_start = (uint8_t*)obj->indices + obj->i_dirty.min_offset;
             glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, obj->i_dirty.min_offset, update_size, data_start);
         }
-        
-        obj->i_dirty.is_dirty = false;
         dirty_reset(&obj->i_dirty);
     }
+
+    mesh->index_count = obj->index_count;
 }
 
-void mesh_bind(Mesh* mesh) {
-    if (!mesh || mesh->vao == 0) return;
+void mesh_bind(MeshHandle handle) {
+    Mesh* mesh = Mesh_get(handle);
+    if (!mesh || !mesh->active) return;
 
     glBindVertexArray(mesh->vao);
 }
 
-void* mesh_get_uniform(Mesh* mesh, const char* name) {
-    return uniform_store_get(&mesh->uniforms, name);
+static void mesh_unload_internal(Mesh* mesh) {
+    if (mesh->vao) glDeleteVertexArrays(1, &mesh->vao);
+    if (mesh->vbo) glDeleteBuffers(1, &mesh->vbo);
+    if (mesh->ebo) glDeleteBuffers(1, &mesh->ebo);
+    mesh->vao = mesh->vbo = mesh->ebo = 0;
 }
 
-void mesh_destroy(Mesh* mesh) {
-    glDeleteVertexArrays(1, &mesh->vao);
-    glDeleteBuffers(1, &mesh->vbo);
-    glDeleteBuffers(1, &mesh->ebo);
+void mesh_delete(MeshHandle handle) {
+    Mesh* mesh = Mesh_get(handle);
+    if (!mesh || !mesh->active) return;
+    mesh_unload_internal(mesh);
+    Mesh_free(handle);
+}
+
+void meshes_free(void) {
+    Mesh_pool_shutdown(mesh_unload_internal);
+
+    Material_pool_shutdown(material_unload_internal);
 }
