@@ -75,4 +75,6 @@ void atlas_define_region(TextureAtlas* atlas, int x, int y, int w, int h, const 
 TextureRegion* atlas_get_region(TextureAtlas* atlas, const char* name);
 void atlas_free(TextureAtlas* atlas);
 
+TextureAtlas* texture_load_msdf(const char* filepath);
+
 #endif // !TEXTURE_H

@@ -211,6 +211,103 @@ TextureHandle texture_load_etc2_bin(const char* filepath) {
     return handle;
 }
 
+#pragma pack(push,1)
+typedef struct {
+    char magic[4];
+    uint32_t width;
+    uint32_t height;
+    uint32_t channels;
+    float px_range;
+    uint32_t num_regions;
+} AtlasHeader;
+
+typedef struct {
+    char name[32];
+    uint32_t left;
+    uint32_t top;
+    uint32_t right;
+    uint32_t bottom;
+} AtlasRegionDef;
+#pragma pack(pop)
+
+TextureAtlas* texture_load_msdf(const char* filepath) {
+    ENGINE_ASSERT(filepath != NULL, "texture_load_msdf called with NULL filepath");
+    
+    FILE* f = fopen(filepath, "rb");
+    if(UNLIKELY(!f)) {
+        LOG_ERROR("Error: Could not open MSDF atlas: '%s'", filepath);
+        return NULL;
+    }
+    
+    // Read the header
+    AtlasHeader header;
+    if (UNLIKELY(fread(&header, sizeof(AtlasHeader), 1, f) != 1)) {
+        LOG_ERROR("Could not read header from MSDF atlas: '%s'", filepath);
+        fclose(f);
+        return NULL;
+    }
+    
+    // Validate the magic number in header
+    if (UNLIKELY(strncmp(header.magic, "ATLS", 4) != 0)) {
+        LOG_ERROR("Invalid magic number in MSDF atlas file header: '%s'", filepath);
+        fclose(f);
+        return NULL;
+    }
+
+    // Read region information header
+    size_t region_size = sizeof(AtlasRegionDef) * header.num_regions;
+    AtlasRegionDef* regions = malloc(region_size);
+    ENGINE_ASSERT(regions != NULL, "Out of memory allocating MSDF atlas region data");
+    
+    if (UNLIKELY(fread(regions, sizeof(AtlasRegionDef), header.num_regions, f) != header.num_regions)) {
+        LOG_ERROR("Could not read full MSDF atlas region data: '%s'", filepath);
+        free(regions);
+        fclose(f);
+        return NULL;
+    }
+    
+    // Read the pixel/image data
+    size_t pixel_size = header.width * header.height * header.channels;
+    unsigned char* pixels = malloc(pixel_size);
+    if (UNLIKELY(fread(pixels, 1, pixel_size, f) != pixel_size)) {
+        LOG_ERROR("Could not read full MSDF atlas texture: '%s'", filepath);
+        free(regions);
+        free(pixels);
+        fclose(f);
+        return NULL;
+    }
+    fclose(f);
+
+    TextureHandle handle = texture_new(header.width, header.height, GL_RGB);
+    Texture* tex = Texture_get(handle);
+    snprintf(tex->path, MAX_TEXTURE_PATH, "%s", filepath);
+    
+    glBindTexture(GL_TEXTURE_2D, tex->id);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, header.width, header.height, 0, GL_RGB, GL_UNSIGNED_BYTE, pixels);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); 
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+
+    free(pixels);
+
+    TextureAtlas* atlas = atlas_create(handle, header.num_regions);
+    for (uint32_t i = 0; i < header.num_regions; i++) {
+        regions[i].name[31] = '\0';
+        atlas_define_region(atlas, 
+                regions[i].left, 
+                regions[i].top, 
+                regions[i].right, 
+                regions[i].bottom,
+                regions[i].name);
+    }
+
+    free(regions);
+    return atlas;
+}
+
 void texture_bind(TextureHandle handle, uint32_t slot) {
     Texture* tex = Texture_get(handle);
     glActiveTexture(GL_TEXTURE0 + slot);
